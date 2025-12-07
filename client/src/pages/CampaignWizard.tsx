@@ -10,6 +10,7 @@ import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { 
   ChevronLeft, 
   ChevronRight, 
@@ -18,17 +19,21 @@ import {
   Wallet,
   Shield,
   Target,
-  Settings,
   AlertTriangle,
   CheckCircle,
   Info,
   Calendar,
   DollarSign,
-  TrendingUp,
   Zap,
   Sparkles,
   Loader2,
-  Lightbulb
+  Lightbulb,
+  Activity,
+  TrendingUp,
+  TrendingDown,
+  AlertCircle,
+  BarChart3,
+  RefreshCw
 } from "lucide-react";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useToast } from "@/hooks/use-toast";
@@ -53,21 +58,67 @@ interface AISuggestion {
   tips: string[];
 }
 
+interface MarketBrief {
+  timestamp: string;
+  overallStatus: 'healthy' | 'warning' | 'critical';
+  dataQuality: {
+    activeSymbols: number;
+    quarantinedSymbols: number;
+    unsupportedSymbols: number;
+    maxStaleness: number;
+    avgStaleness: number;
+  };
+  circuitBreakers: {
+    globalStatus: string;
+    stalenessLevel: string;
+    tradingAllowed: boolean;
+    newPositionsAllowed: boolean;
+  };
+  volatility: {
+    marketAvg: number;
+    level: string;
+    topVolatile: Array<{ symbol: string; volatility: number }>;
+  };
+  recommendation: string;
+}
+
+interface AIStepAdvice {
+  step: string;
+  advice: string;
+  timestamp: string;
+}
+
+interface AICampaignSummary {
+  summary: string;
+  pros: string[];
+  cons: string[];
+  overallScore: number;
+  recommendation: string;
+  config: {
+    name: string;
+    initialCapital: number;
+    duration: number;
+    tradingMode: string;
+    maxDrawdown: number;
+  };
+  timestamp: string;
+}
+
 const STEPS = [
-  { id: 1, key: 'basics', icon: Wallet },
-  { id: 2, key: 'mode', icon: Zap },
-  { id: 3, key: 'portfolio', icon: Target },
-  { id: 4, key: 'risk', icon: Shield },
-  { id: 5, key: 'review', icon: Rocket },
+  { id: 1, key: 'market_brief', icon: Activity },
+  { id: 2, key: 'basics', icon: Wallet },
+  { id: 3, key: 'mode', icon: Zap },
+  { id: 4, key: 'portfolio', icon: Target },
+  { id: 5, key: 'risk', icon: Shield },
+  { id: 6, key: 'review', icon: Rocket },
 ];
 
 export default function CampaignWizard() {
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
   const { toast } = useToast();
   const [, setLocation] = useLocation();
   
   const [currentStep, setCurrentStep] = useState(1);
-  const [isValidating, setIsValidating] = useState(false);
   
   const [formData, setFormData] = useState({
     name: '',
@@ -84,15 +135,55 @@ export default function CampaignWizard() {
     queryKey: ['/api/portfolios'],
   });
 
-  const { data: krakenCredentials, refetch: refetchKrakenCredentials, isLoading: isKrakenLoading } = useQuery<KrakenCredentialsStatus>({
+  const { data: krakenCredentials, refetch: refetchKrakenCredentials } = useQuery<KrakenCredentialsStatus>({
     queryKey: ['/api/user/kraken-credentials'],
     staleTime: 0,
   });
   
   const isKrakenValid = krakenCredentials?.hasApiKey === true && krakenCredentials?.hasApiSecret === true;
 
+  const { data: marketBrief, isLoading: marketBriefLoading, refetch: refetchMarketBrief } = useQuery<MarketBrief>({
+    queryKey: ['/api/dashboard/market-brief'],
+    staleTime: 30000,
+    refetchInterval: 60000,
+  });
+
   const [aiSuggestion, setAiSuggestion] = useState<AISuggestion | null>(null);
   const [isLoadingAI, setIsLoadingAI] = useState(false);
+  const [stepAdvice, setStepAdvice] = useState<string | null>(null);
+  const [isLoadingStepAdvice, setIsLoadingStepAdvice] = useState(false);
+  const [aiSummary, setAiSummary] = useState<AICampaignSummary | null>(null);
+  const [isLoadingAISummary, setIsLoadingAISummary] = useState(false);
+
+  const fetchStepAdvice = async (step: string) => {
+    if (isLoadingStepAdvice) return;
+    
+    setIsLoadingStepAdvice(true);
+    setStepAdvice(null);
+    
+    try {
+      const response = await apiRequest<AIStepAdvice>('/api/ai/campaign-step-advice', 'POST', {
+        step,
+        context: {
+          name: formData.name,
+          initialCapital: parseFloat(formData.initialCapital),
+          duration: formData.duration,
+          tradingMode: formData.tradingMode,
+          portfolioName: formData.portfolioName,
+          maxDrawdown: formData.maxDrawdown,
+          marketStatus: marketBrief?.overallStatus,
+          volatilityLevel: marketBrief?.volatility?.level,
+        },
+        language
+      });
+      
+      setStepAdvice(response.advice);
+    } catch (error: any) {
+      console.error("Error fetching step advice:", error);
+    } finally {
+      setIsLoadingStepAdvice(false);
+    }
+  };
 
   const fetchAISuggestion = async () => {
     if (isLoadingAI) return;
@@ -125,6 +216,35 @@ export default function CampaignWizard() {
     }
   };
 
+  const fetchAISummary = async () => {
+    if (isLoadingAISummary) return;
+    
+    setIsLoadingAISummary(true);
+    setAiSummary(null);
+    
+    try {
+      const response = await apiRequest<AICampaignSummary>('/api/ai/campaign-summary', 'POST', {
+        name: formData.name,
+        initialCapital: parseFloat(formData.initialCapital),
+        duration: formData.duration,
+        tradingMode: formData.tradingMode,
+        portfolioName: formData.portfolioName,
+        maxDrawdown: formData.maxDrawdown,
+        marketStatus: marketBrief?.overallStatus || 'unknown',
+        volatilityLevel: marketBrief?.volatility?.level || 'moderate',
+        totalAssets: marketBrief?.dataQuality?.activeSymbols || 80,
+        clusterCount: 5,
+        language
+      });
+      
+      setAiSummary(response);
+    } catch (error: any) {
+      console.error("Error fetching AI summary:", error);
+    } finally {
+      setIsLoadingAISummary(false);
+    }
+  };
+
   const applyAISuggestion = () => {
     if (aiSuggestion) {
       setFormData(prev => ({ ...prev, maxDrawdown: aiSuggestion.maxDrawdown }));
@@ -135,41 +255,29 @@ export default function CampaignWizard() {
     }
   };
 
+  useEffect(() => {
+    if (currentStep === 6 && !aiSummary && !isLoadingAISummary) {
+      fetchAISummary();
+    }
+  }, [currentStep]);
+
   const createCampaignMutation = useMutation({
     mutationFn: async (data: any) => {
-      console.log('[CampaignWizard] mutationFn called with:', data);
-      try {
-        console.log('[CampaignWizard] Making fetch request to /api/campaigns...');
-        const response = await fetch('/api/campaigns', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(data),
-          credentials: 'include'
-        });
-        console.log('[CampaignWizard] Fetch response status:', response.status);
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error('[CampaignWizard] Response not OK:', response.status, errorText);
-          throw new Error(errorText || `HTTP ${response.status}`);
-        }
-        
-        const result = await response.json();
-        console.log('[CampaignWizard] API response:', result);
-        return result;
-      } catch (error: any) {
-        console.error('[CampaignWizard] API request failed - message:', error?.message);
-        console.error('[CampaignWizard] API request failed - stack:', error?.stack);
-        console.error('[CampaignWizard] API request failed - name:', error?.name);
-        console.error('[CampaignWizard] API request failed - full:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
-        throw error;
+      const response = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        credentials: 'include'
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
       }
+      
+      return await response.json();
     },
-    onMutate: (variables: any) => {
-      console.log('[CampaignWizard] onMutate - mutation starting with:', variables);
-    },
-    onSuccess: (campaign: any) => {
-      console.log('[CampaignWizard] onSuccess - campaign created:', campaign);
+    onSuccess: () => {
       toast({ 
         title: t('wizard.success'), 
         description: t('wizard.campaignCreated')
@@ -178,27 +286,19 @@ export default function CampaignWizard() {
       setLocation('/campaigns');
     },
     onError: (error: any) => {
-      console.error('[CampaignWizard] onError - message:', error?.message);
-      console.error('[CampaignWizard] onError - stack:', error?.stack);
-      console.error('[CampaignWizard] onError - full:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
       toast({ 
         title: t('common.error'), 
         description: error?.message || t('wizard.createError'),
         variant: 'destructive' 
       });
-    },
-    onSettled: (data: any, error: any) => {
-      console.log('[CampaignWizard] onSettled - data:', data);
-      if (error) {
-        console.log('[CampaignWizard] onSettled - error message:', error?.message);
-        console.log('[CampaignWizard] onSettled - error name:', error?.name);
-      }
     }
   });
 
   const validateStep = (step: number): boolean => {
     switch (step) {
       case 1:
+        return true;
+      case 2:
         if (!formData.name.trim()) {
           toast({ title: t('wizard.validation.nameRequired'), variant: 'destructive' });
           return false;
@@ -208,19 +308,19 @@ export default function CampaignWizard() {
           return false;
         }
         return true;
-      case 2:
+      case 3:
         if (formData.tradingMode === 'live' && !isKrakenValid) {
           toast({ title: t('wizard.validation.krakenRequired'), variant: 'destructive' });
           return false;
         }
         return true;
-      case 3:
+      case 4:
         if (!formData.portfolioId) {
           toast({ title: t('wizard.validation.portfolioRequired'), variant: 'destructive' });
           return false;
         }
         return true;
-      case 4:
+      case 5:
         return true;
       default:
         return true;
@@ -229,7 +329,7 @@ export default function CampaignWizard() {
 
   const handleNext = () => {
     if (validateStep(currentStep)) {
-      setCurrentStep(prev => Math.min(prev + 1, 5));
+      setCurrentStep(prev => Math.min(prev + 1, 6));
     }
   };
 
@@ -254,16 +354,7 @@ export default function CampaignWizard() {
   };
 
   const handleCreateCampaign = () => {
-    console.log('[CampaignWizard] Creating campaign...', {
-      tradingMode: formData.tradingMode,
-      isKrakenValid,
-      krakenCredentials,
-      portfolioId: formData.portfolioId,
-      name: formData.name
-    });
-    
     if (formData.tradingMode === 'live' && !isKrakenValid) {
-      console.log('[CampaignWizard] Blocked: Kraken credentials not valid for LIVE mode');
       toast({ 
         title: t('wizard.validation.krakenRequired'), 
         description: t('wizard.configureKraken'),
@@ -291,11 +382,28 @@ export default function CampaignWizard() {
       },
     };
     
-    console.log('[CampaignWizard] Sending campaign data:', campaignData);
     createCampaignMutation.mutate(campaignData);
   };
 
   const progressPercentage = ((currentStep - 1) / (STEPS.length - 1)) * 100;
+
+  const getMarketStatusColor = (status: string) => {
+    switch (status) {
+      case 'healthy': return 'text-green-500';
+      case 'warning': return 'text-yellow-500';
+      case 'critical': return 'text-red-500';
+      default: return 'text-muted-foreground';
+    }
+  };
+
+  const getMarketStatusIcon = (status: string) => {
+    switch (status) {
+      case 'healthy': return <CheckCircle className="w-5 h-5" />;
+      case 'warning': return <AlertTriangle className="w-5 h-5" />;
+      case 'critical': return <AlertCircle className="w-5 h-5" />;
+      default: return <Info className="w-5 h-5" />;
+    }
+  };
 
   return (
     <div className="container max-w-4xl mx-auto py-8 px-4">
@@ -308,7 +416,6 @@ export default function CampaignWizard() {
         </p>
       </div>
 
-      {/* Progress Bar */}
       <div className="mb-8">
         <div className="flex justify-between mb-2">
           {STEPS.map((step) => {
@@ -343,7 +450,6 @@ export default function CampaignWizard() {
         <Progress value={progressPercentage} className="h-2" data-testid="progress-wizard" />
       </div>
 
-      {/* Step Content */}
       <Card className="mb-6">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -358,8 +464,150 @@ export default function CampaignWizard() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {/* Step 1: Basic Information */}
           {currentStep === 1 && (
+            <div className="space-y-6">
+              {marketBriefLoading ? (
+                <div className="space-y-4">
+                  <Skeleton className="h-24 w-full" />
+                  <Skeleton className="h-16 w-full" />
+                  <Skeleton className="h-16 w-full" />
+                </div>
+              ) : marketBrief ? (
+                <>
+                  <div className={`p-4 rounded-lg border-2 ${
+                    marketBrief.overallStatus === 'healthy' ? 'border-green-500/30 bg-green-500/5' :
+                    marketBrief.overallStatus === 'warning' ? 'border-yellow-500/30 bg-yellow-500/5' :
+                    'border-red-500/30 bg-red-500/5'
+                  }`}>
+                    <div className="flex items-center justify-between mb-3">
+                      <div className={`flex items-center gap-2 ${getMarketStatusColor(marketBrief.overallStatus)}`}>
+                        {getMarketStatusIcon(marketBrief.overallStatus)}
+                        <span className="font-medium text-lg">
+                          {t(`wizard.market.status.${marketBrief.overallStatus}`)}
+                        </span>
+                      </div>
+                      <Button 
+                        variant="ghost" 
+                        size="sm"
+                        onClick={() => refetchMarketBrief()}
+                        data-testid="button-refresh-market"
+                      >
+                        <RefreshCw className="w-4 h-4" />
+                      </Button>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {marketBrief.recommendation}
+                    </p>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="p-4 rounded-lg bg-muted/50">
+                      <div className="flex items-center gap-2 text-muted-foreground mb-2">
+                        <BarChart3 className="w-4 h-4" />
+                        {t('wizard.market.dataQuality')}
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm">{t('wizard.market.activeSymbols')}</span>
+                          <Badge variant="secondary">{marketBrief.dataQuality?.activeSymbols ?? 0}</Badge>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm">{t('wizard.market.staleness')}</span>
+                          <span className="text-sm font-mono">
+                            {(marketBrief.dataQuality?.avgStaleness ?? 0).toFixed(1)}s
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-4 rounded-lg bg-muted/50">
+                      <div className="flex items-center gap-2 text-muted-foreground mb-2">
+                        {marketBrief.volatility?.level === 'high' ? (
+                          <TrendingUp className="w-4 h-4" />
+                        ) : marketBrief.volatility?.level === 'low' ? (
+                          <TrendingDown className="w-4 h-4" />
+                        ) : (
+                          <Activity className="w-4 h-4" />
+                        )}
+                        {t('wizard.market.volatility')}
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm">{t('wizard.market.avgVolatility')}</span>
+                          <Badge variant={
+                            marketBrief.volatility?.level === 'high' ? 'destructive' :
+                            marketBrief.volatility?.level === 'low' ? 'secondary' : 'outline'
+                          }>
+                            {((marketBrief.volatility?.marketAvg ?? 0) * 100).toFixed(2)}%
+                          </Badge>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm">{t('wizard.market.level')}</span>
+                          <span className="text-sm capitalize">{marketBrief.volatility?.level ?? 'normal'}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-4 rounded-lg bg-muted/50">
+                    <div className="flex items-center gap-2 text-muted-foreground mb-2">
+                      <Shield className="w-4 h-4" />
+                      {t('wizard.market.circuitBreakers')}
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="flex items-center gap-2">
+                        {marketBrief.circuitBreakers?.tradingAllowed ? (
+                          <CheckCircle className="w-4 h-4 text-green-500" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-red-500" />
+                        )}
+                        <span className="text-sm">
+                          {marketBrief.circuitBreakers?.tradingAllowed 
+                            ? t('wizard.market.tradingAllowed')
+                            : t('wizard.market.tradingBlocked')
+                          }
+                        </span>
+                      </div>
+                      <Badge variant={
+                        marketBrief.circuitBreakers?.stalenessLevel === 'normal' ? 'secondary' :
+                        marketBrief.circuitBreakers?.stalenessLevel === 'warn' ? 'outline' : 'destructive'
+                      }>
+                        {(marketBrief.circuitBreakers?.stalenessLevel ?? 'normal').toUpperCase()}
+                      </Badge>
+                    </div>
+                  </div>
+
+                  {(marketBrief.volatility?.topVolatile?.length ?? 0) > 0 && (
+                    <div className="p-4 rounded-lg border border-muted">
+                      <h4 className="text-sm font-medium mb-3">{t('wizard.market.topVolatile')}</h4>
+                      <div className="flex flex-wrap gap-2">
+                        {marketBrief.volatility?.topVolatile?.slice(0, 5).map((asset) => (
+                          <Badge key={asset.symbol} variant="outline">
+                            {asset.symbol} ({((asset.volatility ?? 0) * 100).toFixed(1)}%)
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-center py-8">
+                  <AlertCircle className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+                  <p className="text-muted-foreground">{t('wizard.market.noData')}</p>
+                  <Button 
+                    variant="outline" 
+                    onClick={() => refetchMarketBrief()}
+                    className="mt-4"
+                    data-testid="button-retry-market"
+                  >
+                    {t('common.retry')}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {currentStep === 2 && (
             <div className="space-y-6">
               <div className="space-y-2">
                 <Label htmlFor="campaign-name">{t('wizard.campaignName')}</Label>
@@ -411,8 +659,7 @@ export default function CampaignWizard() {
             </div>
           )}
 
-          {/* Step 2: Trading Mode */}
-          {currentStep === 2 && (
+          {currentStep === 3 && (
             <div className="space-y-6">
               <RadioGroup
                 value={formData.tradingMode}
@@ -494,8 +741,7 @@ export default function CampaignWizard() {
             </div>
           )}
 
-          {/* Step 3: Portfolio Selection */}
-          {currentStep === 3 && (
+          {currentStep === 4 && (
             <div className="space-y-6">
               {portfoliosLoading ? (
                 <div className="flex items-center justify-center py-8">
@@ -577,8 +823,7 @@ export default function CampaignWizard() {
             </div>
           )}
 
-          {/* Step 4: Risk Configuration */}
-          {currentStep === 4 && (
+          {currentStep === 5 && (
             <div className="space-y-6">
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
@@ -693,8 +938,7 @@ export default function CampaignWizard() {
             </div>
           )}
 
-          {/* Step 5: Review & Activate */}
-          {currentStep === 5 && (
+          {currentStep === 6 && (
             <div className="space-y-6">
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="p-4 rounded-lg bg-muted/50">
@@ -761,23 +1005,99 @@ export default function CampaignWizard() {
 
               <Separator />
 
-              <div className="p-4 rounded-lg border-2 border-primary/20 bg-primary/5">
-                <div className="flex items-start gap-3">
-                  <Rocket className="w-6 h-6 text-primary mt-0.5" />
-                  <div>
-                    <h4 className="font-medium">{t('wizard.readyToLaunch')}</h4>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      {t('wizard.launchDescription')}
-                    </p>
+              {isLoadingAISummary ? (
+                <div className="p-4 rounded-lg border border-primary/20 bg-primary/5">
+                  <div className="flex items-center gap-3">
+                    <Loader2 className="w-6 h-6 text-primary animate-spin" />
+                    <div>
+                      <h4 className="font-medium">{t('wizard.aiAnalyzing')}</h4>
+                      <p className="text-sm text-muted-foreground">
+                        {t('wizard.aiAnalyzingDesc')}
+                      </p>
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : aiSummary ? (
+                <div className="p-4 rounded-lg border border-primary/20 bg-primary/5 space-y-4">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-5 h-5 text-primary" />
+                      <h4 className="font-medium">{t('wizard.aiSummary')}</h4>
+                    </div>
+                    <Badge variant={
+                      aiSummary.overallScore >= 8 ? 'default' :
+                      aiSummary.overallScore >= 6 ? 'secondary' : 'destructive'
+                    }>
+                      {aiSummary.overallScore}/10
+                    </Badge>
+                  </div>
+                  
+                  <p className="text-sm text-muted-foreground">{aiSummary.summary}</p>
+                  
+                  {aiSummary.pros && aiSummary.pros.length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-green-600 mb-2">{t('wizard.pros')}</p>
+                      <ul className="text-xs text-muted-foreground space-y-1">
+                        {aiSummary.pros.map((pro, idx) => (
+                          <li key={idx} className="flex items-start gap-2">
+                            <CheckCircle className="w-3 h-3 text-green-500 mt-0.5 flex-shrink-0" />
+                            {pro}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  
+                  {aiSummary.cons && aiSummary.cons.length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-yellow-600 mb-2">{t('wizard.cons')}</p>
+                      <ul className="text-xs text-muted-foreground space-y-1">
+                        {aiSummary.cons.map((con, idx) => (
+                          <li key={idx} className="flex items-start gap-2">
+                            <AlertTriangle className="w-3 h-3 text-yellow-500 mt-0.5 flex-shrink-0" />
+                            {con}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  
+                  {aiSummary.recommendation && (
+                    <div className="pt-2 border-t border-primary/10">
+                      <p className="text-xs font-medium text-primary mb-1">{t('wizard.aiRecommendation')}</p>
+                      <p className="text-sm text-muted-foreground">{aiSummary.recommendation}</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="p-4 rounded-lg border-2 border-primary/20 bg-primary/5">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-start gap-3">
+                      <Rocket className="w-6 h-6 text-primary mt-0.5" />
+                      <div>
+                        <h4 className="font-medium">{t('wizard.readyToLaunch')}</h4>
+                        <p className="text-sm text-muted-foreground mt-1">
+                          {t('wizard.launchDescription')}
+                        </p>
+                      </div>
+                    </div>
+                    <Button 
+                      variant="ghost" 
+                      size="sm"
+                      onClick={() => fetchAISummary()}
+                      disabled={isLoadingAISummary}
+                      data-testid="button-retry-ai-summary"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </CardContent>
       </Card>
 
-      {/* Navigation Buttons */}
       <div className="flex justify-between">
         <Button
           variant="outline"
@@ -789,7 +1109,7 @@ export default function CampaignWizard() {
           {t('wizard.previous')}
         </Button>
 
-        {currentStep < 5 ? (
+        {currentStep < 6 ? (
           <Button
             onClick={handleNext}
             data-testid="button-next"
