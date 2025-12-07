@@ -4,7 +4,7 @@ import crypto from "crypto";
 import { db } from "./db";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated } from "./replitAuth";
-import { getChatCompletion, checkRateLimit, analyzeMarket, type MarketContext } from "./services/openaiService";
+import { getChatCompletion, checkRateLimit, analyzeMarket, type MarketContext, type ChatMessage } from "./services/openaiService";
 import { analyzeRankings, analyzeClusters, suggestTradingStrategy, analyzeRiskProfile, suggestCampaignRisk, type CampaignContext } from "./services/ai/aiAnalysisService";
 import { performanceService } from "./services/performanceService";
 import { TradingService } from "./services/tradingService";
@@ -40,7 +40,7 @@ import {
   symbols
 } from "@shared/schema";
 import { z } from "zod";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 
 // Custom Zod schemas for non-DB endpoints
 const krakenCredentialsSchema = z.object({
@@ -525,6 +525,253 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching dashboard stats:", error);
       res.status(500).json({ message: "Failed to fetch dashboard stats" });
+    }
+  });
+
+  // Market Brief endpoint for Campaign Wizard - aggregates market conditions
+  app.get('/api/dashboard/market-brief', isAuthenticated, async (req: any, res) => {
+    try {
+      // Get staleness status
+      const stalenessLevel = stalenessGuardService.getGlobalStalenessLevel();
+      const quarantineStatus = stalenessGuardService.getQuarantineStatus();
+      
+      // Get latest asset rankings to determine active symbols
+      const latestRankings = await db.select()
+        .from(symbol_rankings)
+        .orderBy(desc(symbol_rankings.created_at))
+        .limit(100);
+      
+      const activeSymbolsCount = latestRankings.length;
+      const quarantinedCount = quarantineStatus.quarantinedSymbols?.length || 0;
+      
+      // Determine market status based on staleness
+      let marketStatus: 'healthy' | 'warning' | 'critical' = 'healthy';
+      let statusMessage = 'Market data is fresh and trading conditions are normal';
+      
+      if (stalenessLevel === 'kill_switch') {
+        marketStatus = 'critical';
+        statusMessage = 'Market data is severely delayed - trading is paused for safety';
+      } else if (stalenessLevel === 'hard') {
+        marketStatus = 'critical';
+        statusMessage = 'Market data is delayed - new positions are blocked';
+      } else if (stalenessLevel === 'warn') {
+        marketStatus = 'warning';
+        statusMessage = 'Some market data is slightly delayed - proceed with caution';
+      } else if (quarantinedCount > 10) {
+        marketStatus = 'warning';
+        statusMessage = `${quarantinedCount} symbols are temporarily unavailable`;
+      }
+      
+      // Calculate average volatility from recent rankings
+      let avgVolatility = 2.5; // Default moderate volatility
+      if (latestRankings.length > 0) {
+        const volatilityScores = latestRankings
+          .filter((r: any) => r.score !== null)
+          .map((r: any) => parseFloat(r.score || '0'));
+        if (volatilityScores.length > 0) {
+          avgVolatility = volatilityScores.reduce((a: number, b: number) => a + b, 0) / volatilityScores.length;
+        }
+      }
+      
+      // Determine volatility level
+      let volatilityLevel: 'low' | 'moderate' | 'high' = 'moderate';
+      if (avgVolatility < 1) volatilityLevel = 'low';
+      else if (avgVolatility > 4) volatilityLevel = 'high';
+      
+      // Get recommended drawdown based on volatility
+      let recommendedMaxDrawdown = 10;
+      if (volatilityLevel === 'high') recommendedMaxDrawdown = 8;
+      else if (volatilityLevel === 'low') recommendedMaxDrawdown = 12;
+      
+      res.json({
+        timestamp: new Date().toISOString(),
+        marketStatus,
+        statusMessage,
+        stalenessLevel,
+        activeSymbols: activeSymbolsCount,
+        quarantinedSymbols: quarantinedCount,
+        volatility: {
+          level: volatilityLevel,
+          avgScore: avgVolatility.toFixed(2),
+        },
+        tradingRecommendation: {
+          canStartCampaign: marketStatus !== 'critical',
+          recommendedMaxDrawdown,
+          warningMessages: marketStatus === 'warning' ? [statusMessage] : [],
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching market brief:", error);
+      res.status(500).json({ message: "Failed to fetch market brief" });
+    }
+  });
+
+  // Risk current volatility endpoint for Campaign Wizard
+  app.get('/api/risk/current-volatility', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      // Get user's portfolios to check circuit breaker status
+      const portfolios = await storage.getPortfoliosByUserId(userId);
+      
+      // Check circuit breakers status
+      let breakersActive = 0;
+      let breakersTriggered: string[] = [];
+      
+      for (const portfolio of portfolios) {
+        const riskParams = await storage.getRiskParametersByPortfolioId(portfolio.id);
+        if (riskParams?.circuit_breaker_triggered) {
+          breakersActive++;
+          breakersTriggered.push(portfolio.name);
+        }
+      }
+      
+      // Get staleness status
+      const stalenessLevel = stalenessGuardService.getGlobalStalenessLevel();
+      
+      // Calculate market risk level
+      let riskLevel: 'low' | 'moderate' | 'high' | 'extreme' = 'moderate';
+      let riskScore = 50; // 0-100 scale
+      
+      if (stalenessLevel === 'kill_switch' || stalenessLevel === 'hard') {
+        riskLevel = 'extreme';
+        riskScore = 95;
+      } else if (breakersActive > 0) {
+        riskLevel = 'high';
+        riskScore = 75;
+      } else if (stalenessLevel === 'warn') {
+        riskLevel = 'moderate';
+        riskScore = 55;
+      } else {
+        riskLevel = 'low';
+        riskScore = 30;
+      }
+      
+      // Risk-adjusted drawdown recommendations
+      const recommendations = {
+        conservative: { maxDrawdown: 5, description: 'Very protective - for beginners or uncertain markets' },
+        moderate: { maxDrawdown: 10, description: 'Balanced approach - recommended for most traders' },
+        aggressive: { maxDrawdown: 15, description: 'Higher risk tolerance - for experienced traders' },
+      };
+      
+      // Adjust recommendations based on current risk
+      if (riskLevel === 'high' || riskLevel === 'extreme') {
+        recommendations.conservative.maxDrawdown = 3;
+        recommendations.moderate.maxDrawdown = 7;
+        recommendations.aggressive.maxDrawdown = 10;
+      }
+      
+      res.json({
+        timestamp: new Date().toISOString(),
+        riskLevel,
+        riskScore,
+        circuitBreakers: {
+          active: breakersActive,
+          triggeredPortfolios: breakersTriggered,
+        },
+        stalenessLevel,
+        recommendations,
+        warning: riskLevel === 'extreme' 
+          ? 'Market conditions are very unstable. Consider waiting before starting a new campaign.'
+          : null,
+      });
+    } catch (error) {
+      console.error("Error fetching current volatility:", error);
+      res.status(500).json({ message: "Failed to fetch volatility data" });
+    }
+  });
+
+  // Recommended assets endpoint for Campaign Wizard
+  app.get('/api/asset-selection/recommended', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      // Get latest rankings with cluster info
+      const latestRankings = await db.select()
+        .from(symbol_rankings)
+        .orderBy(desc(symbol_rankings.created_at))
+        .limit(50);
+      
+      if (latestRankings.length === 0) {
+        return res.json({
+          hasSelection: false,
+          message: 'No asset selection has been run yet. The system will automatically select the best assets when you start a campaign.',
+          assets: [],
+          clusters: [],
+        });
+      }
+      
+      // Group by cluster
+      const clusterMap = new Map<number, any[]>();
+      for (const ranking of latestRankings) {
+        const cluster = ranking.cluster_number || 0;
+        if (!clusterMap.has(cluster)) {
+          clusterMap.set(cluster, []);
+        }
+        clusterMap.get(cluster)!.push(ranking);
+      }
+      
+      // Get symbol details
+      const symbolIds = latestRankings.map((r: any) => r.symbol_id);
+      const symbolDetails = await db.select()
+        .from(symbols)
+        .where(sql`${symbols.id} IN (${sql.join(symbolIds.map(id => sql`${id}`), sql`, `)})`);
+      
+      const symbolMap = new Map(symbolDetails.map((s: any) => [s.id, s]));
+      
+      // Build cluster summaries with simple explanations
+      const clusterDescriptions = [
+        'High volume, stable assets - great for consistent trading',
+        'Growth potential assets - higher volatility but more opportunities',
+        'Emerging assets - newer but showing promise',
+        'Defensive assets - lower volatility for capital protection',
+        'Speculative assets - high risk, high reward potential',
+      ];
+      
+      const clusters = Array.from(clusterMap.entries()).map(([clusterNum, rankings], idx) => {
+        const clusterAssets = rankings.map((r: any) => {
+          const sym = symbolMap.get(r.symbol_id);
+          return {
+            symbol: sym?.symbol || 'Unknown',
+            rank: r.rank,
+            score: parseFloat(r.score || '0').toFixed(2),
+          };
+        }).sort((a: any, b: any) => a.rank - b.rank);
+        
+        return {
+          clusterNumber: clusterNum,
+          name: `Cluster ${clusterNum + 1}`,
+          description: clusterDescriptions[idx % clusterDescriptions.length],
+          assetCount: clusterAssets.length,
+          topAssets: clusterAssets.slice(0, 5),
+        };
+      });
+      
+      // Top assets overall
+      const topAssets = latestRankings
+        .slice(0, 10)
+        .map((r: any) => {
+          const sym = symbolMap.get(r.symbol_id);
+          return {
+            symbol: sym?.symbol || 'Unknown',
+            exchangeSymbol: sym?.exchange_symbol || 'Unknown',
+            rank: r.rank,
+            score: parseFloat(r.score || '0').toFixed(2),
+            cluster: r.cluster_number,
+          };
+        });
+      
+      res.json({
+        hasSelection: true,
+        lastUpdated: latestRankings[0]?.created_at || new Date().toISOString(),
+        totalAssets: latestRankings.length,
+        clusters,
+        topAssets,
+        explanation: `We've analyzed ${latestRankings.length} cryptocurrency pairs and grouped them into ${clusters.length} clusters based on their trading characteristics. The system will automatically diversify your campaign across these groups.`,
+      });
+    } catch (error) {
+      console.error("Error fetching recommended assets:", error);
+      res.status(500).json({ message: "Failed to fetch recommended assets" });
     }
   });
 
@@ -2213,6 +2460,189 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: any) {
       console.error("Error in campaign risk suggestion:", error);
       res.status(500).json({ message: error.message || "Failed to suggest campaign risk parameters" });
+    }
+  });
+
+  // Campaign Step Advice - AI coaching for each wizard step
+  const campaignStepAdviceSchema = z.object({
+    step: z.enum(['market_brief', 'basics', 'mode', 'portfolio', 'assets', 'risk', 'review']),
+    context: z.object({
+      name: z.string().optional(),
+      initialCapital: z.number().optional(),
+      duration: z.number().optional(),
+      tradingMode: z.enum(['paper', 'live']).optional(),
+      portfolioName: z.string().optional(),
+      maxDrawdown: z.number().optional(),
+      marketStatus: z.string().optional(),
+      volatilityLevel: z.string().optional(),
+    }).optional(),
+    language: z.enum(['en', 'es', 'pt-BR']).optional().default('pt-BR')
+  });
+
+  app.post('/api/ai/campaign-step-advice', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      const rateLimitCheck = checkRateLimit(userId);
+      if (!rateLimitCheck.allowed) {
+        return res.status(429).json({ message: rateLimitCheck.message });
+      }
+      
+      const parseResult = campaignStepAdviceSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request parameters",
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const { step, context, language } = parseResult.data;
+      
+      // Build contextual prompt based on step
+      const stepPrompts: Record<string, string> = {
+        market_brief: `Current market conditions for starting a trading campaign. Market status: ${context?.marketStatus || 'unknown'}. Volatility: ${context?.volatilityLevel || 'moderate'}.`,
+        basics: `Setting up campaign basics. Name: ${context?.name || 'not set'}. Capital: $${context?.initialCapital || 0}. Duration: ${context?.duration || 30} days.`,
+        mode: `Choosing trading mode. Current selection: ${context?.tradingMode || 'paper'}. This affects real money vs simulation.`,
+        portfolio: `Selecting portfolio for campaign. Portfolio: ${context?.portfolioName || 'not selected'}.`,
+        assets: `Asset selection for trading. The system automatically selects best assets using K-means clustering.`,
+        risk: `Configuring risk parameters. Max drawdown: ${context?.maxDrawdown || 10}%. Volatility level: ${context?.volatilityLevel || 'moderate'}.`,
+        review: `Final review before launching. Capital: $${context?.initialCapital || 0}, Mode: ${context?.tradingMode || 'paper'}, Duration: ${context?.duration || 30} days, Max Drawdown: ${context?.maxDrawdown || 10}%.`
+      };
+      
+      const languageInstructions: Record<string, string> = {
+        'en': 'Respond in English. Use simple, clear language.',
+        'es': 'Responde en espanol. Usa lenguaje simple y claro.',
+        'pt-BR': 'Responda em portugues brasileiro. Use linguagem simples e clara.'
+      };
+      
+      const systemPrompt = `You are DELFOS AI, a friendly trading assistant helping users set up their cryptocurrency trading campaigns. 
+${languageInstructions[language]}
+Keep responses under 100 words.
+Be encouraging but realistic about risks.
+Focus on practical advice for the current step.`;
+
+      const userPrompt = `The user is on the "${step}" step of campaign setup.
+Context: ${stepPrompts[step] || 'General campaign setup'}
+Provide a brief, helpful tip for this step. Include one specific actionable suggestion.`;
+
+      const messages: ChatMessage[] = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ];
+      
+      const response = await getChatCompletion(messages, userId);
+      
+      res.json({
+        step,
+        advice: response,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error: any) {
+      console.error("Error in campaign step advice:", error);
+      res.status(500).json({ message: error.message || "Failed to get step advice" });
+    }
+  });
+
+  // Campaign Summary - AI narrative recap with pros/cons
+  const campaignSummarySchema = z.object({
+    name: z.string(),
+    initialCapital: z.number().positive(),
+    duration: z.number().int().min(1).max(365),
+    tradingMode: z.enum(['paper', 'live']),
+    portfolioName: z.string(),
+    maxDrawdown: z.number().min(1).max(50),
+    marketStatus: z.string().optional(),
+    volatilityLevel: z.string().optional(),
+    totalAssets: z.number().optional(),
+    clusterCount: z.number().optional(),
+    language: z.enum(['en', 'es', 'pt-BR']).optional().default('pt-BR')
+  });
+
+  app.post('/api/ai/campaign-summary', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      const rateLimitCheck = checkRateLimit(userId);
+      if (!rateLimitCheck.allowed) {
+        return res.status(429).json({ message: rateLimitCheck.message });
+      }
+      
+      const parseResult = campaignSummarySchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request parameters",
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const config = parseResult.data;
+      
+      const languageInstructions: Record<string, string> = {
+        'en': 'Respond in English.',
+        'es': 'Responde en espanol.',
+        'pt-BR': 'Responda em portugues brasileiro.'
+      };
+      
+      const systemPrompt = `You are DELFOS AI, a professional trading assistant.
+${languageInstructions[config.language]}
+Provide a balanced, honest analysis.
+Format your response as JSON with these fields:
+- summary: A 2-3 sentence executive summary
+- pros: Array of 3 advantages of this configuration
+- cons: Array of 2-3 potential risks or considerations
+- overallScore: A score from 1-10 rating this campaign setup
+- recommendation: A single actionable recommendation`;
+
+      const userPrompt = `Analyze this trading campaign configuration:
+- Campaign Name: ${config.name}
+- Initial Capital: $${config.initialCapital}
+- Duration: ${config.duration} days
+- Trading Mode: ${config.tradingMode === 'live' ? 'LIVE (real money)' : 'PAPER (simulation)'}
+- Portfolio: ${config.portfolioName}
+- Max Drawdown Limit: ${config.maxDrawdown}%
+- Market Status: ${config.marketStatus || 'normal'}
+- Volatility Level: ${config.volatilityLevel || 'moderate'}
+- Assets to Trade: ${config.totalAssets || 30} across ${config.clusterCount || 5} clusters
+
+Provide your analysis as valid JSON.`;
+
+      const messages: ChatMessage[] = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ];
+      
+      const response = await getChatCompletion(messages, userId);
+      
+      // Try to parse as JSON, fallback to text if needed
+      let analysis;
+      try {
+        // Remove markdown code blocks if present
+        const cleanResponse = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        analysis = JSON.parse(cleanResponse);
+      } catch {
+        analysis = {
+          summary: response,
+          pros: [],
+          cons: [],
+          overallScore: 7,
+          recommendation: 'Review the configuration and proceed when ready.'
+        };
+      }
+      
+      res.json({
+        ...analysis,
+        config: {
+          name: config.name,
+          initialCapital: config.initialCapital,
+          duration: config.duration,
+          tradingMode: config.tradingMode,
+          maxDrawdown: config.maxDrawdown,
+        },
+        timestamp: new Date().toISOString()
+      });
+    } catch (error: any) {
+      console.error("Error in campaign summary:", error);
+      res.status(500).json({ message: error.message || "Failed to generate campaign summary" });
     }
   });
 
