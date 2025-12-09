@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -22,8 +23,20 @@ import {
   Target,
   Wallet,
   Zap,
-  AlertCircle
+  AlertCircle,
+  Trash2
 } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -65,6 +78,31 @@ interface Portfolio {
   total_value_usd: string;
 }
 
+interface ClusterSummary {
+  totalAssets: number;
+  tradableAssets: number;
+  clusterCount: number;
+  clusters: { cluster: number; count: number; tradable: number }[];
+}
+
+const CLUSTER_COLORS = [
+  { bg: 'bg-blue-500', text: 'text-white' },
+  { bg: 'bg-green-500', text: 'text-white' },
+  { bg: 'bg-purple-500', text: 'text-white' },
+  { bg: 'bg-orange-500', text: 'text-white' },
+  { bg: 'bg-pink-500', text: 'text-white' },
+  { bg: 'bg-cyan-500', text: 'text-white' },
+  { bg: 'bg-yellow-500', text: 'text-black' },
+  { bg: 'bg-red-500', text: 'text-white' },
+  { bg: 'bg-indigo-500', text: 'text-white' },
+  { bg: 'bg-teal-500', text: 'text-white' },
+];
+
+function getClusterColor(clusterNumber: number | null) {
+  if (clusterNumber === null) return { bg: 'bg-muted', text: 'text-muted-foreground' };
+  return CLUSTER_COLORS[clusterNumber % CLUSTER_COLORS.length];
+}
+
 function ActiveCampaignCard({ 
   campaign, 
   portfolios, 
@@ -83,6 +121,7 @@ function ActiveCampaignCard({
   pendingAction: string | null;
 }) {
   const { t } = useLanguage();
+  const [, setLocation] = useLocation();
 
   const { data: metrics, isLoading: metricsLoading, isError: metricsError, refetch: refetchMetrics } = useQuery<CampaignMetrics>({
     queryKey: ['/api/campaigns', campaign.id, 'metrics'],
@@ -94,6 +133,17 @@ function ActiveCampaignCard({
     refetchInterval: 10000,
     retry: 2,
     staleTime: 5000,
+  });
+
+  const { data: clusterSummary } = useQuery<ClusterSummary>({
+    queryKey: ['/api/campaigns', campaign.id, 'cluster-summary'],
+    queryFn: async () => {
+      const res = await fetch(`/api/campaigns/${campaign.id}/cluster-summary`, { credentials: 'include' });
+      if (!res.ok) throw new Error('Failed to fetch cluster summary');
+      return res.json();
+    },
+    staleTime: 60000,
+    retry: 1,
   });
 
   const formatCurrency = (value: number | string) => {
@@ -152,7 +202,11 @@ function ActiveCampaignCard({
           <div className="flex items-center gap-3">
             <Calendar className={`h-6 w-6 ${isLive ? 'text-red-500' : 'text-primary'}`} />
             <div>
-              <CardTitle className="text-xl" data-testid={`campaign-name-${campaign.id}`}>
+              <CardTitle 
+                className="text-xl cursor-pointer hover:text-primary transition-colors" 
+                data-testid={`campaign-name-${campaign.id}`}
+                onClick={() => setLocation(`/campaigns/${campaign.id}`)}
+              >
                 {campaign.name}
               </CardTitle>
               <CardDescription className="flex items-center gap-2 flex-wrap">
@@ -373,6 +427,34 @@ function ActiveCampaignCard({
           </div>
         )}
 
+        {clusterSummary && clusterSummary.clusters.length > 0 && (
+          <div className="p-3 bg-muted/30 rounded-lg" data-testid={`campaign-clusters-${campaign.id}`}>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs text-muted-foreground font-medium flex items-center gap-1">
+                <Target className="h-3 w-3" />
+                {t('campaign.clusters')} ({clusterSummary.clusterCount})
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {clusterSummary.tradableAssets}/{clusterSummary.totalAssets} {t('campaign.tradableAssets')}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {clusterSummary.clusters.map((c) => {
+                const color = getClusterColor(c.cluster);
+                return (
+                  <Badge 
+                    key={c.cluster}
+                    className={`${color.bg} ${color.text} text-xs font-mono`}
+                    data-testid={`cluster-badge-${c.cluster}`}
+                  >
+                    C{c.cluster} ({c.tradable}/{c.count})
+                  </Badge>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <Separator />
 
         <div className="flex flex-wrap gap-3">
@@ -440,15 +522,29 @@ function CompactCampaignCard({
   portfolios,
   onResume,
   onStop,
+  onDelete,
   pendingAction
 }: { 
   campaign: Campaign;
   portfolios: Portfolio[];
   onResume?: (id: string) => void;
   onStop?: (id: string) => void;
+  onDelete?: (id: string) => void;
   pendingAction?: string | null;
 }) {
   const { t } = useLanguage();
+  const [, setLocation] = useLocation();
+
+  const { data: clusterSummary } = useQuery<ClusterSummary>({
+    queryKey: ['/api/campaigns', campaign.id, 'cluster-summary'],
+    queryFn: async () => {
+      const res = await fetch(`/api/campaigns/${campaign.id}/cluster-summary`, { credentials: 'include' });
+      if (!res.ok) throw new Error('Failed to fetch cluster summary');
+      return res.json();
+    },
+    staleTime: 60000,
+    retry: 1,
+  });
 
   const formatCurrency = (value: number | string) => {
     const num = typeof value === 'string' ? parseFloat(value) : value;
@@ -526,7 +622,11 @@ function CompactCampaignCard({
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div>
-            <CardTitle className="text-base" data-testid={`campaign-name-${campaign.id}`}>
+            <CardTitle 
+              className="text-base cursor-pointer hover:text-primary transition-colors" 
+              data-testid={`campaign-name-${campaign.id}`}
+              onClick={() => setLocation(`/campaigns/${campaign.id}`)}
+            >
               {campaign.name}
             </CardTitle>
             <CardDescription className="text-xs flex items-center gap-2 flex-wrap">
@@ -581,6 +681,33 @@ function CompactCampaignCard({
             {formatPercentage(pnlPercentage)}
           </span>
         </div>
+
+        {clusterSummary && clusterSummary.clusters.length > 0 && (
+          <div className="p-2 bg-muted/30 rounded-lg" data-testid={`campaign-clusters-${campaign.id}`}>
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-xs text-muted-foreground font-medium">
+                {t('campaign.clusters')} ({clusterSummary.clusterCount})
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {clusterSummary.tradableAssets}/{clusterSummary.totalAssets}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {clusterSummary.clusters.map((c) => {
+                const color = getClusterColor(c.cluster);
+                return (
+                  <Badge 
+                    key={c.cluster}
+                    className={`${color.bg} ${color.text} text-xs font-mono px-1.5 py-0`}
+                    data-testid={`cluster-badge-${c.cluster}`}
+                  >
+                    C{c.cluster}
+                  </Badge>
+                );
+              })}
+            </div>
+          </div>
+        )}
         
         {campaign.status === 'paused' && onResume && onStop && (
           <div className="flex gap-2 pt-2">
@@ -604,6 +731,43 @@ function CompactCampaignCard({
               <Square className="h-3 w-3 mr-1" />
               {t('campaign.stop')}
             </Button>
+          </div>
+        )}
+        
+        {/* Delete button for stopped/completed/paused campaigns */}
+        {['stopped', 'completed', 'paused'].includes(campaign.status) && onDelete && (
+          <div className="flex justify-end pt-2">
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                  disabled={isPending}
+                  data-testid={`button-delete-campaign-${campaign.id}`}
+                >
+                  <Trash2 className="h-3 w-3 mr-1" />
+                  {t('campaign.delete')}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>{t('campaign.deleteConfirmTitle')}</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {t('campaign.deleteConfirmDesc')} "{campaign.name}"?
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={() => onDelete(campaign.id)}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  >
+                    {t('campaign.delete')}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
         )}
       </CardContent>
@@ -683,6 +847,23 @@ export default function Campaigns() {
     },
     onSuccess: () => {
       toast({ title: t('campaign.rebalanced'), description: t('campaign.rebalancedDesc') });
+      queryClient.invalidateQueries({ queryKey: ['/api/campaigns/all'] });
+    },
+    onError: () => {
+      toast({ title: t('common.error'), variant: 'destructive' });
+    },
+    onSettled: () => {
+      setPendingAction(null);
+    }
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (campaignId: string) => {
+      setPendingAction(campaignId);
+      return apiRequest(`/api/campaigns/${campaignId}`, 'DELETE');
+    },
+    onSuccess: () => {
+      toast({ title: t('campaign.deleted'), description: t('campaign.deletedDesc') });
       queryClient.invalidateQueries({ queryKey: ['/api/campaigns/all'] });
     },
     onError: () => {
@@ -793,6 +974,7 @@ export default function Campaigns() {
                         portfolios={portfolios || []}
                         onResume={(id) => resumeMutation.mutate(id)}
                         onStop={(id) => stopMutation.mutate(id)}
+                        onDelete={(id) => deleteMutation.mutate(id)}
                         pendingAction={pendingAction}
                       />
                     ))}
@@ -814,6 +996,8 @@ export default function Campaigns() {
                         key={campaign.id}
                         campaign={campaign}
                         portfolios={portfolios || []}
+                        onDelete={(id) => deleteMutation.mutate(id)}
+                        pendingAction={pendingAction}
                       />
                     ))}
                   </div>
