@@ -33,7 +33,8 @@ import type {
   TaxProfile, InsertTaxProfile,
   TradeCost, InsertTradeCost,
   AuthorizedEmail, InsertAuthorizedEmail,
-  ApiToken, InsertApiToken
+  ApiToken, InsertApiToken,
+  RiskProfileConfig, InsertRiskProfileConfig
 } from "@shared/schema";
 
 export interface IStorage {
@@ -145,6 +146,10 @@ export interface IStorage {
   createAuditLog(log: InsertAuditTrail): Promise<AuditTrail>;
   getAuditTrailByUser(userId: string, limit?: number): Promise<AuditTrail[]>;
   
+  // Risk Profile Configurations (C/M/A)
+  getRiskProfiles(): Promise<RiskProfileConfig[]>;
+  getRiskProfileByCode(code: string): Promise<RiskProfileConfig | undefined>;
+
   // Campaigns
   getCampaignsByPortfolio(portfolioId: string): Promise<Campaign[]>;
   getCampaign(id: string): Promise<Campaign | undefined>;
@@ -773,6 +778,18 @@ export class DbStorage implements IStorage {
       .where(eq(schema.audit_trail.user_id, userId))
       .orderBy(desc(schema.audit_trail.created_at))
       .limit(limit);
+  }
+
+  // ===== RISK PROFILE CONFIGURATIONS =====
+  async getRiskProfiles(): Promise<RiskProfileConfig[]> {
+    return await db.select().from(schema.risk_profile_config)
+      .orderBy(schema.risk_profile_config.profile_code);
+  }
+
+  async getRiskProfileByCode(code: string): Promise<RiskProfileConfig | undefined> {
+    const [profile] = await db.select().from(schema.risk_profile_config)
+      .where(eq(schema.risk_profile_config.profile_code, code));
+    return profile;
   }
 
   // ===== CAMPAIGNS =====
