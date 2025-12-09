@@ -96,7 +96,21 @@ export const getQueryFn: <T>(options: {
       credentials: "include",
     });
 
-    // Always throw on errors (including 401) for consistent handling
+    // Handle 401 based on behavior setting
+    if (res.status === 401) {
+      if (unauthorizedBehavior === "returnNull") {
+        return null;
+      }
+      // For "throw" behavior, redirect to login
+      if (!isRedirectingToLogin) {
+        isRedirectingToLogin = true;
+        console.log('[AUTH] Unauthorized - redirecting to login');
+        window.location.href = '/api/login';
+      }
+      throw new Error('Unauthorized - redirecting to login');
+    }
+
+    // Handle other errors
     await throwIfResNotOk(res);
     return await res.json();
   };
