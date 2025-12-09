@@ -37,10 +37,17 @@ import {
   signals as signalsTable,
   signal_configs as signalConfigsTable,
   symbol_rankings,
-  symbols
+  symbols,
+  campaigns,
+  robot_activity_logs,
+  portfolios,
+  clusters,
+  campaign_risk_states,
+  campaign_orders,
+  campaign_positions
 } from "@shared/schema";
 import { z } from "zod";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
 
 // Custom Zod schemas for non-DB endpoints
 const krakenCredentialsSchema = z.object({
@@ -469,6 +476,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Risk profiles route - get all predefined risk profiles (C/M/A)
+  app.get('/api/risk-profiles', isAuthenticated, async (req: any, res) => {
+    try {
+      const profiles = await storage.getRiskProfiles();
+      res.json(profiles);
+    } catch (error) {
+      console.error("Error fetching risk profiles:", error);
+      res.status(500).json({ message: "Failed to fetch risk profiles" });
+    }
+  });
+
   app.get('/api/dashboard/stats', isAuthenticated, async (req: any, res) => {
     try {
       const userId = req.user.claims.sub;
@@ -515,16 +533,67 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ? (dailyPnL / portfolioValue) * 100 
         : 0;
       
+      // Get active campaigns count
+      const activeCampaigns = await db.select()
+        .from(campaigns)
+        .where(and(
+          eq(campaigns.status, 'running'),
+          inArray(campaigns.portfolio_id, portfolios.map(p => p.id))
+        ));
+      
+      // Count open positions (positions table only contains open positions)
+      const openPositionsCount = allPositions.length;
+      
       res.json({
         portfolio_value: portfolioValue.toFixed(2),
         daily_pnl: dailyPnL.toFixed(2),
         daily_pnl_percentage: dailyPnLPercentage.toFixed(2),
         unrealized_pnl: unrealizedPnL.toFixed(2),
         realized_pnl: realizedPnL.toFixed(2),
+        active_campaigns: activeCampaigns.length,
+        open_positions: openPositionsCount,
       });
     } catch (error) {
       console.error("Error fetching dashboard stats:", error);
       res.status(500).json({ message: "Failed to fetch dashboard stats" });
+    }
+  });
+
+  // Recent robot activities for dashboard
+  app.get('/api/robot-activities/recent', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      // Get user portfolios to filter campaigns
+      const portfolios = await storage.getPortfoliosByUserId(userId);
+      const portfolioIds = portfolios.map(p => p.id);
+      
+      if (portfolioIds.length === 0) {
+        return res.json([]);
+      }
+      
+      // Get campaigns for user's portfolios
+      const userCampaigns = await db.select()
+        .from(campaigns)
+        .where(inArray(campaigns.portfolio_id, portfolioIds));
+      
+      const campaignIds = userCampaigns.map(c => c.id);
+      
+      if (campaignIds.length === 0) {
+        return res.json([]);
+      }
+      
+      // Get recent activities from user's campaigns
+      const activities = await db.select()
+        .from(robot_activity_logs)
+        .where(inArray(robot_activity_logs.campaign_id, campaignIds))
+        .orderBy(desc(robot_activity_logs.created_at))
+        .limit(20);
+      
+      res.json(activities);
+    } catch (error) {
+      console.error("Error fetching robot activities:", error);
+      res.status(500).json({ message: "Failed to fetch robot activities" });
     }
   });
 
@@ -1028,6 +1097,61 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error creating portfolio:", error);
       res.status(500).json({ message: "Failed to create portfolio" });
+    }
+  });
+
+  // Delete portfolio (only if no active campaigns)
+  app.delete('/api/portfolios/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const portfolioId = req.params.id;
+
+      // Verify ownership
+      const portfolio = await db.select().from(portfolios).where(eq(portfolios.id, portfolioId)).limit(1);
+      if (!portfolio.length) {
+        return res.status(404).json({ message: "Portfolio not found" });
+      }
+      if (portfolio[0].user_id !== userId) {
+        return res.status(403).json({ message: "Not authorized to delete this portfolio" });
+      }
+
+      // Check for active campaigns
+      const activeCampaigns = await db.select()
+        .from(campaigns)
+        .where(and(
+          eq(campaigns.portfolio_id, portfolioId),
+          eq(campaigns.status, 'active')
+        ))
+        .limit(1);
+      
+      if (activeCampaigns.length > 0) {
+        return res.status(400).json({ 
+          message: "Cannot delete portfolio with active campaigns. Stop the campaigns first." 
+        });
+      }
+
+      // Delete all non-active campaigns first (cascading to related tables)
+      const portfolioCampaigns = await db.select({ id: campaigns.id })
+        .from(campaigns)
+        .where(eq(campaigns.portfolio_id, portfolioId));
+      
+      for (const campaign of portfolioCampaigns) {
+        // Delete related records in correct order
+        await db.delete(robot_activity_logs).where(eq(robot_activity_logs.campaign_id, campaign.id));
+        await db.delete(campaign_risk_states).where(eq(campaign_risk_states.campaign_id, campaign.id));
+        await db.delete(clusters).where(eq(clusters.campaign_id, campaign.id));
+        await db.delete(campaign_orders).where(eq(campaign_orders.campaign_id, campaign.id));
+        await db.delete(campaign_positions).where(eq(campaign_positions.campaign_id, campaign.id));
+        await db.delete(campaigns).where(eq(campaigns.id, campaign.id));
+      }
+
+      // Delete portfolio (cascades to positions, trades, risk_parameters via onDelete: 'cascade')
+      await db.delete(portfolios).where(eq(portfolios.id, portfolioId));
+
+      res.json({ success: true, message: "Portfolio deleted successfully" });
+    } catch (error) {
+      console.error("Error deleting portfolio:", error);
+      res.status(500).json({ message: "Failed to delete portfolio" });
     }
   });
 
@@ -4835,6 +4959,24 @@ Provide your analysis as valid JSON.`;
     }
   });
 
+  // Campaigns - Get single campaign by ID
+  app.get('/api/campaigns/detail/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      res.json(ownershipCheck.campaign);
+    } catch (error) {
+      console.error("Error fetching campaign:", error);
+      res.status(500).json({ message: "Failed to fetch campaign" });
+    }
+  });
+
   // Campaigns - Get by portfolio
   app.get('/api/campaigns/:portfolioId', isAuthenticated, async (req: any, res) => {
     try {
@@ -5133,6 +5275,419 @@ Provide your analysis as valid JSON.`;
     } catch (error) {
       console.error("Error fetching campaign orders:", error);
       res.status(500).json({ message: "Failed to fetch campaign orders" });
+    }
+  });
+
+  // ===== CAMPAIGN ENGINE ENDPOINTS (Multi-Campaign Autonomous Trading) =====
+  
+  // Campaign Engine - Start the main trading loop
+  app.post('/api/campaign-engine/start', isAuthenticated, async (req: any, res) => {
+    try {
+      const { campaignEngineService } = await import('./services/trading/campaignEngineService');
+      
+      if (campaignEngineService.isRunning()) {
+        return res.json({ message: "Campaign engine is already running", status: "running" });
+      }
+      
+      await campaignEngineService.startMainLoop();
+      res.json({ message: "Campaign engine started", status: "running" });
+    } catch (error: any) {
+      console.error("Error starting campaign engine:", error);
+      res.status(500).json({ message: "Failed to start campaign engine" });
+    }
+  });
+
+  // Campaign Engine - Stop the main trading loop
+  app.post('/api/campaign-engine/stop', isAuthenticated, async (req: any, res) => {
+    try {
+      const { campaignEngineService } = await import('./services/trading/campaignEngineService');
+      
+      campaignEngineService.stopMainLoop();
+      res.json({ message: "Campaign engine stopped", status: "stopped" });
+    } catch (error: any) {
+      console.error("Error stopping campaign engine:", error);
+      res.status(500).json({ message: "Failed to stop campaign engine" });
+    }
+  });
+
+  // Campaign Engine - Get status and all engine states
+  app.get('/api/campaign-engine/status', isAuthenticated, async (req: any, res) => {
+    try {
+      const { campaignEngineService } = await import('./services/trading/campaignEngineService');
+      
+      res.json({
+        isRunning: campaignEngineService.isRunning(),
+        engineStates: campaignEngineService.getAllEngineStates(),
+      });
+    } catch (error: any) {
+      console.error("Error getting campaign engine status:", error);
+      res.status(500).json({ message: "Failed to get campaign engine status" });
+    }
+  });
+
+  // Campaign Engine - Public health check and auto-start (no auth required for diagnostics)
+  app.get('/api/campaign-engine/health', async (req, res) => {
+    try {
+      const { campaignEngineService } = await import('./services/trading/campaignEngineService');
+      const isRunning = campaignEngineService.isRunning();
+      
+      // Auto-start if not running
+      if (!isRunning) {
+        console.log('[CampaignEngine] Health check detected engine not running - auto-starting...');
+        await campaignEngineService.startMainLoop();
+      }
+      
+      // Get active campaigns count
+      const activeCampaigns = await db.select({ id: campaigns.id }).from(campaigns).where(eq(campaigns.status, 'active'));
+      
+      res.json({
+        status: campaignEngineService.isRunning() ? 'running' : 'starting',
+        activeCampaigns: activeCampaigns.length,
+        engineStates: campaignEngineService.getAllEngineStates(),
+        timestamp: new Date().toISOString()
+      });
+    } catch (error: any) {
+      console.error("Error in campaign engine health check:", error);
+      res.status(500).json({ status: 'error', message: error.message });
+    }
+  });
+
+  // Helper function to verify campaign ownership
+  async function verifyCampaignOwnership(campaignId: string, userId: string): Promise<{ success: boolean; error?: string; statusCode?: number; campaign?: any }> {
+    const campaign = await storage.getCampaign(campaignId);
+    if (!campaign) {
+      return { success: false, error: "Campaign not found", statusCode: 404 };
+    }
+    
+    const portfolio = await storage.getPortfolio(campaign.portfolio_id);
+    if (!portfolio) {
+      return { success: false, error: "Portfolio not found", statusCode: 404 };
+    }
+    
+    if (portfolio.user_id !== userId) {
+      return { success: false, error: "Access denied", statusCode: 403 };
+    }
+    
+    return { success: true, campaign };
+  }
+
+  // Campaign Engine - Get risk state for a specific campaign
+  app.get('/api/campaigns/:id/risk-state', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const riskStates = await db.select().from(require('@shared/schema').campaign_risk_states)
+        .where(eq(require('@shared/schema').campaign_risk_states.campaign_id, id))
+        .limit(1);
+      
+      if (riskStates.length === 0) {
+        return res.status(404).json({ message: "Risk state not found for this campaign" });
+      }
+      
+      res.json(riskStates[0]);
+    } catch (error: any) {
+      console.error("Error fetching campaign risk state:", error);
+      res.status(500).json({ message: "Failed to fetch campaign risk state" });
+    }
+  });
+
+  // Campaign Engine - Get asset universe for a campaign
+  app.get('/api/campaigns/:id/universe', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const universe = await db.select().from(require('@shared/schema').campaign_asset_universes)
+        .where(eq(require('@shared/schema').campaign_asset_universes.campaign_id, id));
+      
+      res.json(universe);
+    } catch (error: any) {
+      console.error("Error fetching campaign universe:", error);
+      res.status(500).json({ message: "Failed to fetch campaign asset universe" });
+    }
+  });
+
+  // Campaign Engine - Get cluster summary for a campaign (lightweight endpoint for campaign list)
+  app.get('/api/campaigns/:id/cluster-summary', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const universe = await db.select().from(require('@shared/schema').campaign_asset_universes)
+        .where(eq(require('@shared/schema').campaign_asset_universes.campaign_id, id));
+      
+      // Calculate cluster summary
+      const clusterMap = new Map<number, { count: number; tradable: number }>();
+      let totalAssets = 0;
+      let tradableAssets = 0;
+      
+      for (const asset of universe) {
+        totalAssets++;
+        if (asset.is_in_tradable_set) tradableAssets++;
+        
+        if (asset.cluster_number !== null) {
+          const existing = clusterMap.get(asset.cluster_number) || { count: 0, tradable: 0 };
+          existing.count++;
+          if (asset.is_in_tradable_set) existing.tradable++;
+          clusterMap.set(asset.cluster_number, existing);
+        }
+      }
+      
+      // Convert map to sorted array
+      const clusters = Array.from(clusterMap.entries())
+        .map(([clusterNumber, data]) => ({
+          cluster: clusterNumber,
+          count: data.count,
+          tradable: data.tradable
+        }))
+        .sort((a, b) => a.cluster - b.cluster);
+      
+      res.json({
+        totalAssets,
+        tradableAssets,
+        clusterCount: clusters.length,
+        clusters
+      });
+    } catch (error: any) {
+      console.error("Error fetching campaign cluster summary:", error);
+      res.status(500).json({ message: "Failed to fetch cluster summary" });
+    }
+  });
+
+  // Campaign Engine - Get daily reports for a campaign
+  app.get('/api/campaigns/:id/daily-reports', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const reports = await db.select().from(require('@shared/schema').campaign_daily_reports)
+        .where(eq(require('@shared/schema').campaign_daily_reports.campaign_id, id))
+        .orderBy(desc(require('@shared/schema').campaign_daily_reports.report_date));
+      
+      res.json(reports);
+    } catch (error: any) {
+      console.error("Error fetching campaign daily reports:", error);
+      res.status(500).json({ message: "Failed to fetch campaign daily reports" });
+    }
+  });
+
+  // Campaign Engine - Get positions for a campaign
+  app.get('/api/campaigns/:id/positions', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const { state } = req.query;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      let query = db.select().from(require('@shared/schema').campaign_positions)
+        .where(eq(require('@shared/schema').campaign_positions.campaign_id, id));
+      
+      if (state) {
+        query = query.where(and(
+          eq(require('@shared/schema').campaign_positions.campaign_id, id),
+          eq(require('@shared/schema').campaign_positions.state, state as string)
+        ));
+      }
+      
+      const positions = await query.orderBy(desc(require('@shared/schema').campaign_positions.opened_at));
+      res.json(positions);
+    } catch (error: any) {
+      console.error("Error fetching campaign positions:", error);
+      res.status(500).json({ message: "Failed to fetch campaign positions" });
+    }
+  });
+
+  // Campaign Engine - Get campaign-specific orders
+  app.get('/api/campaigns/:id/engine-orders', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.query;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      let query = db.select().from(require('@shared/schema').campaign_orders)
+        .where(eq(require('@shared/schema').campaign_orders.campaign_id, id));
+      
+      if (status) {
+        query = query.where(and(
+          eq(require('@shared/schema').campaign_orders.campaign_id, id),
+          eq(require('@shared/schema').campaign_orders.status, status as string)
+        ));
+      }
+      
+      const orders = await query.orderBy(desc(require('@shared/schema').campaign_orders.created_at));
+      res.json(orders);
+    } catch (error: any) {
+      console.error("Error fetching campaign engine orders:", error);
+      res.status(500).json({ message: "Failed to fetch campaign engine orders" });
+    }
+  });
+
+  // Campaign Engine - Trigger manual circuit breaker reset for a pair
+  app.post('/api/campaigns/:id/reset-pair-cb', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const { symbol } = req.body;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      if (!symbol) {
+        return res.status(400).json({ message: "Symbol is required" });
+      }
+      
+      const [riskState] = await db.select().from(require('@shared/schema').campaign_risk_states)
+        .where(eq(require('@shared/schema').campaign_risk_states.campaign_id, id));
+      
+      if (!riskState) {
+        return res.status(404).json({ message: "Risk state not found" });
+      }
+      
+      const cbPairTriggered = (riskState.cb_pair_triggered || {}) as Record<string, boolean>;
+      cbPairTriggered[symbol] = false;
+      
+      const lossInRByPair = (riskState.loss_in_r_by_pair || {}) as Record<string, number>;
+      lossInRByPair[symbol] = 0;
+      
+      await db.update(require('@shared/schema').campaign_risk_states)
+        .set({
+          cb_pair_triggered: cbPairTriggered,
+          loss_in_r_by_pair: lossInRByPair,
+          updated_at: new Date()
+        })
+        .where(eq(require('@shared/schema').campaign_risk_states.campaign_id, id));
+      
+      res.json({ message: `Circuit breaker reset for ${symbol}`, symbol });
+    } catch (error: any) {
+      console.error("Error resetting pair circuit breaker:", error);
+      res.status(500).json({ message: "Failed to reset pair circuit breaker" });
+    }
+  });
+
+  // Campaign Engine - Trigger manual daily CB reset
+  app.post('/api/campaigns/:id/reset-daily-cb', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      await db.update(require('@shared/schema').campaign_risk_states)
+        .set({
+          cb_daily_triggered: false,
+          daily_loss_pct: "0",
+          cb_cooldown_until: null,
+          updated_at: new Date()
+        })
+        .where(eq(require('@shared/schema').campaign_risk_states.campaign_id, id));
+      
+      res.json({ message: "Daily circuit breaker reset" });
+    } catch (error: any) {
+      console.error("Error resetting daily circuit breaker:", error);
+      res.status(500).json({ message: "Failed to reset daily circuit breaker" });
+    }
+  });
+
+  // Delete campaign (only stopped/completed campaigns can be deleted)
+  app.delete('/api/campaigns/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const campaign = ownershipCheck.campaign!;
+      
+      // Only allow deletion of stopped, completed, or paused campaigns
+      if (!['stopped', 'completed', 'paused'].includes(campaign.status)) {
+        return res.status(400).json({ 
+          message: "Only stopped, completed, or paused campaigns can be deleted" 
+        });
+      }
+      
+      // Delete related data first (cascade)
+      await db.delete(require('@shared/schema').robot_activity_logs)
+        .where(eq(require('@shared/schema').robot_activity_logs.campaign_id, id));
+      await db.delete(require('@shared/schema').campaign_risk_states)
+        .where(eq(require('@shared/schema').campaign_risk_states.campaign_id, id));
+      await db.delete(require('@shared/schema').clusters)
+        .where(eq(require('@shared/schema').clusters.campaign_id, id));
+      await db.delete(require('@shared/schema').campaign_orders)
+        .where(eq(require('@shared/schema').campaign_orders.campaign_id, id));
+      await db.delete(require('@shared/schema').campaign_positions)
+        .where(eq(require('@shared/schema').campaign_positions.campaign_id, id));
+      
+      // Finally delete the campaign
+      await db.delete(campaigns).where(eq(campaigns.id, id));
+      
+      res.json({ message: "Campaign deleted successfully" });
+    } catch (error: any) {
+      console.error("Error deleting campaign:", error);
+      res.status(500).json({ message: "Failed to delete campaign" });
+    }
+  });
+
+  // Robot Activity Feed - Get recent activities for a campaign
+  app.get('/api/campaigns/:id/activities', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const { limit = '50', sinceMinutes } = req.query;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const { robotActivityService } = await import('./services/robotActivityService');
+      const activities = await robotActivityService.getRecentActivities(
+        id,
+        parseInt(limit as string),
+        sinceMinutes ? parseInt(sinceMinutes as string) : undefined
+      );
+      
+      res.json(activities);
+    } catch (error: any) {
+      console.error("Error fetching robot activities:", error);
+      res.status(500).json({ message: "Failed to fetch robot activities" });
     }
   });
 
