@@ -145,8 +145,20 @@ app.use((req, res, next) => {
       
       log('[INFO] Background services started successfully');
       
+      // Start Campaign Engine (autonomous trading robot)
+      try {
+        const { campaignEngineService } = await import("./services/trading/campaignEngineService");
+        await campaignEngineService.startMainLoop();
+        log('[INFO] Campaign Engine started - processing active campaigns every 5 seconds');
+      } catch (engineError) {
+        log(`[WARN] Campaign Engine failed to start: ${engineError}`);
+      }
+      
       // Cleanup on shutdown
-      process.on('SIGINT', () => {
+      process.on('SIGINT', async () => {
+        log('[INFO] Shutting down services...');
+        const { campaignEngineService } = await import("./services/trading/campaignEngineService");
+        campaignEngineService.stopMainLoop();
         stalenessGuardService.stop();
         clearInterval(marketDataInterval);
         krakenWsManager.close();
@@ -156,6 +168,7 @@ app.use((req, res, next) => {
         dataRetentionService.stop();
         clockSyncService.stopPeriodicCheck();
         keyRotationService.stopPeriodicCheck();
+        log('[INFO] All services stopped');
         process.exit(0);
       });
     } catch (error) {
