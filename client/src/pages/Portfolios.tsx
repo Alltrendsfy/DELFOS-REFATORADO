@@ -7,11 +7,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { useToast } from "@/hooks/use-toast";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Plus, Wallet, TrendingUp, TrendingDown, RefreshCw } from "lucide-react";
+import { Plus, Wallet, TrendingUp, TrendingDown, RefreshCw, Trash2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { insertPortfolioSchema, type Portfolio } from "@shared/schema";
@@ -45,6 +46,12 @@ const translations = {
     paperModeDescription: "Simulate trades without real money (recommended for testing)",
     paperModeBadge: "PAPER",
     liveModeBadge: "LIVE",
+    delete: "Delete",
+    deleteConfirmTitle: "Delete Portfolio",
+    deleteConfirmDesc: "Are you sure you want to delete this portfolio? All associated campaigns and data will be permanently deleted.",
+    portfolioDeleted: "Portfolio deleted successfully",
+    cannotDeleteActive: "Cannot delete portfolio with active campaigns",
+    deleting: "Deleting...",
   },
   es: {
     title: "Gestión de Carteras",
@@ -73,6 +80,12 @@ const translations = {
     paperModeDescription: "Simular operaciones sin dinero real (recomendado para pruebas)",
     paperModeBadge: "PAPER",
     liveModeBadge: "EN VIVO",
+    delete: "Eliminar",
+    deleteConfirmTitle: "Eliminar Cartera",
+    deleteConfirmDesc: "Estas seguro de que deseas eliminar esta cartera? Todas las campanas y datos asociados seran eliminados permanentemente.",
+    portfolioDeleted: "Cartera eliminada exitosamente",
+    cannotDeleteActive: "No se puede eliminar cartera con campanas activas",
+    deleting: "Eliminando...",
   },
   "pt-BR": {
     title: "Gestão de Carteiras",
@@ -101,6 +114,12 @@ const translations = {
     paperModeDescription: "Simular operações sem dinheiro real (recomendado para testes)",
     paperModeBadge: "PAPER",
     liveModeBadge: "AO VIVO",
+    delete: "Excluir",
+    deleteConfirmTitle: "Excluir Carteira",
+    deleteConfirmDesc: "Tem certeza que deseja excluir esta carteira? Todas as campanhas e dados associados serao excluidos permanentemente.",
+    portfolioDeleted: "Carteira excluida com sucesso",
+    cannotDeleteActive: "Nao e possivel excluir carteira com campanhas ativas",
+    deleting: "Excluindo...",
   },
 };
 
@@ -115,6 +134,7 @@ export default function Portfolios() {
   const { toast } = useToast();
   const t = translations[language as keyof typeof translations];
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const hasAutoOpened = useRef(false);
 
   // Create dynamic schema with localized messages
@@ -152,6 +172,26 @@ export default function Portfolios() {
     },
     onError: (error: any) => {
       const errorMessage = error instanceof Error ? error.message : t.errorLoading;
+      toast({ title: t.error, description: errorMessage, variant: "destructive" });
+    },
+  });
+
+  // Delete portfolio mutation
+  const deletePortfolioMutation = useMutation({
+    mutationFn: async (portfolioId: string) => {
+      setDeletingId(portfolioId);
+      return await apiRequest(`/api/portfolios/${portfolioId}`, "DELETE");
+    },
+    onSuccess: async () => {
+      setDeletingId(null);
+      await queryClient.invalidateQueries({ queryKey: ["/api/portfolios"] });
+      toast({ title: t.portfolioDeleted });
+    },
+    onError: (error: any) => {
+      setDeletingId(null);
+      const errorMessage = error?.message?.includes("active campaigns") 
+        ? t.cannotDeleteActive 
+        : (error instanceof Error ? error.message : t.errorLoading);
       toast({ title: t.error, description: errorMessage, variant: "destructive" });
     },
   });
@@ -407,6 +447,44 @@ export default function Portfolios() {
                           ({parseFloat(portfolio.daily_pnl_percentage).toFixed(2)}%)
                         </span>
                       </div>
+                    </div>
+                    <div className="pt-2 border-t flex justify-end">
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button 
+                            variant="ghost" 
+                            size="sm"
+                            className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                            disabled={deletingId !== null}
+                            data-testid={`button-delete-portfolio-${portfolio.id}`}
+                          >
+                            {deletingId === portfolio.id ? (
+                              <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4 mr-1" />
+                            )}
+                            {deletingId === portfolio.id ? t.deleting : t.delete}
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>{t.deleteConfirmTitle}</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              {t.deleteConfirmDesc}
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={() => deletePortfolioMutation.mutate(portfolio.id)}
+                              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                              data-testid={`button-confirm-delete-${portfolio.id}`}
+                            >
+                              {t.delete}
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
                     </div>
                   </CardContent>
                 </Card>
