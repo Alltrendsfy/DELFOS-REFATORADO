@@ -416,24 +416,90 @@ export const audit_trail = pgTable("audit_trail", {
   index("idx_audit_created").on(table.created_at),
 ]);
 
+// Risk Profile Configuration - stores predefined risk profiles (C/M/A)
+export const risk_profile_config = pgTable("risk_profile_config", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  profile_code: varchar("profile_code", { length: 1 }).notNull().unique(), // C, M, A
+  profile_name: varchar("profile_name", { length: 50 }).notNull(), // Conservador, Moderado, Agressivo
+  
+  // Risk per trade
+  risk_per_trade_pct: decimal("risk_per_trade_pct", { precision: 5, scale: 2 }).notNull(), // 0.20, 0.50, 1.00
+  max_loss_per_pair_r: integer("max_loss_per_pair_r").notNull(), // 2R, 3R, 4R
+  
+  // Daily limits
+  max_daily_loss_pct: decimal("max_daily_loss_pct", { precision: 5, scale: 2 }).notNull(), // 2.0, 4.0, 7.0
+  max_drawdown_30d_pct: decimal("max_drawdown_30d_pct", { precision: 5, scale: 2 }).notNull(), // 8.0, 12.0, 20.0
+  
+  // Trailing drawdown
+  use_trailing_dd: boolean("use_trailing_dd").default(true).notNull(),
+  trailing_dd_pct_on_profit: decimal("trailing_dd_pct_on_profit", { precision: 5, scale: 2 }).notNull(), // 20.0, 25.0, 30.0
+  
+  // Position limits
+  max_open_positions: integer("max_open_positions").notNull(), // 5, 10, 20
+  max_trades_per_day: integer("max_trades_per_day").notNull(), // 15, 30, 60
+  cooldown_minutes_after_cb: integer("cooldown_minutes_after_cb").notNull(), // 60, 30, 15
+  
+  // Position management
+  allow_add_position: boolean("allow_add_position").default(false).notNull(),
+  max_adds_per_trade: integer("max_adds_per_trade").default(0).notNull(), // 0, 1, 2
+  
+  // Circuit breakers
+  cb_pair_enabled: boolean("cb_pair_enabled").default(true).notNull(),
+  cb_pair_loss_threshold_r: integer("cb_pair_loss_threshold_r").notNull(), // 2R, 3R, 4R
+  cb_daily_enabled: boolean("cb_daily_enabled").default(true).notNull(),
+  cb_daily_loss_threshold_pct: decimal("cb_daily_loss_threshold_pct", { precision: 5, scale: 2 }).notNull(),
+  cb_campaign_enabled: boolean("cb_campaign_enabled").default(true).notNull(),
+  cb_campaign_dd_threshold_pct: decimal("cb_campaign_dd_threshold_pct", { precision: 5, scale: 2 }).notNull(),
+  lock_day_after_cb_daily: boolean("lock_day_after_cb_daily").default(true).notNull(),
+  lock_campaign_after_cb_campaign: boolean("lock_campaign_after_cb_campaign").default(true).notNull(),
+  
+  // ATR sizing
+  use_atr_sizing: boolean("use_atr_sizing").default(true).notNull(),
+  atr_lookback_period: integer("atr_lookback_period").default(14).notNull(),
+  target_atr_pct_reference: decimal("target_atr_pct_reference", { precision: 5, scale: 2 }).notNull(), // 1.5, 2.5, 5.0
+  min_atr_pct_tradable: decimal("min_atr_pct_tradable", { precision: 5, scale: 2 }).notNull(), // 0.5, 1.0, 2.0
+  max_atr_pct_tradable: decimal("max_atr_pct_tradable", { precision: 5, scale: 2 }).notNull(), // 3.0, 5.0, 8.0
+  max_position_pct_capital_per_pair: decimal("max_position_pct_capital_per_pair", { precision: 5, scale: 2 }).notNull(), // 5.0, 10.0, 15.0
+  
+  // Selection filters (differentiated by profile)
+  min_volume_24h_usd: decimal("min_volume_24h_usd", { precision: 20, scale: 2 }).notNull(), // 150M, 80M, 50M
+  max_spread_pct: decimal("max_spread_pct", { precision: 5, scale: 4 }).notNull(), // 0.05, 0.08, 0.15
+  min_depth_usd: decimal("min_depth_usd", { precision: 20, scale: 2 }).notNull(), // 1M, 500k, 300k
+  
+  // Take Profit multipliers (ATR-based)
+  tp_atr_multiplier: decimal("tp_atr_multiplier", { precision: 5, scale: 2 }).notNull(), // 1.5, 2.0, 3.0
+  sl_atr_multiplier: decimal("sl_atr_multiplier", { precision: 5, scale: 2 }).default("1.0").notNull(),
+  
+  // Max slippage allowed
+  max_slippage_pct: decimal("max_slippage_pct", { precision: 5, scale: 4 }).notNull(), // 0.05, 0.10, 0.20
+  
+  // Max risk per cluster
+  max_cluster_risk_pct: decimal("max_cluster_risk_pct", { precision: 5, scale: 2 }).notNull(), // 6.0, 10.0, 15.0
+  
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  updated_at: timestamp("updated_at").defaultNow().notNull(),
+});
+
 // Campaigns table - stores 30-day trading campaigns
 export const campaigns = pgTable("campaigns", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   portfolio_id: varchar("portfolio_id").notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
   name: text("name").notNull(),
+  investor_profile: varchar("investor_profile", { length: 1 }).default("M").notNull(), // C, M, A (Conservador, Moderado, Agressivo)
   start_date: timestamp("start_date").notNull(),
   end_date: timestamp("end_date").notNull(),
   initial_capital: decimal("initial_capital", { precision: 20, scale: 2 }).notNull(),
   current_equity: decimal("current_equity", { precision: 20, scale: 2 }).notNull(),
   max_drawdown_percentage: decimal("max_drawdown_percentage", { precision: 5, scale: 2 }).default("-10").notNull(),
   status: text("status").notNull(), // active, paused, completed, stopped
-  risk_config: jsonb("risk_config"), // Snapshot of risk parameters
+  risk_config: jsonb("risk_config"), // Snapshot of risk parameters from risk_profile_config
   selection_config: jsonb("selection_config"), // Asset selection criteria
   created_at: timestamp("created_at").defaultNow().notNull(),
   completed_at: timestamp("completed_at"),
 }, (table) => [
   index("idx_campaigns_portfolio").on(table.portfolio_id),
   index("idx_campaigns_status").on(table.status),
+  index("idx_campaigns_profile").on(table.investor_profile),
 ]);
 
 // Clusters table - stores asset clustering data
@@ -790,6 +856,15 @@ export const insertAuditTrailSchema = createInsertSchema(audit_trail).omit({
 export type InsertAuditTrail = z.infer<typeof insertAuditTrailSchema>;
 export type AuditTrail = typeof audit_trail.$inferSelect;
 
+// Risk Profile Config
+export const insertRiskProfileConfigSchema = createInsertSchema(risk_profile_config).omit({
+  id: true,
+  created_at: true,
+  updated_at: true,
+});
+export type InsertRiskProfileConfig = z.infer<typeof insertRiskProfileConfigSchema>;
+export type RiskProfileConfig = typeof risk_profile_config.$inferSelect;
+
 // Campaigns
 export const insertCampaignSchema = createInsertSchema(campaigns).omit({
   id: true,
@@ -1137,6 +1212,231 @@ export const backtest_metrics = pgTable("backtest_metrics", {
   index("idx_backtest_metrics_validation").on(table.validation_passed),
 ]);
 
+// ========== MULTI-CAMPAIGN ENGINE TABLES ==========
+
+// Campaign Risk State - tracks real-time risk state per campaign (isolated)
+export const campaign_risk_states = pgTable("campaign_risk_states", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }).unique(),
+  
+  // Equity tracking
+  current_equity: decimal("current_equity", { precision: 20, scale: 2 }).notNull(),
+  equity_high_watermark: decimal("equity_high_watermark", { precision: 20, scale: 2 }).notNull(),
+  
+  // Daily PnL tracking (resets at 00:00 UTC)
+  daily_pnl: decimal("daily_pnl", { precision: 20, scale: 2 }).default("0").notNull(),
+  daily_pnl_pct: decimal("daily_pnl_pct", { precision: 10, scale: 4 }).default("0").notNull(),
+  daily_loss_pct: decimal("daily_loss_pct", { precision: 10, scale: 4 }).default("0").notNull(),
+  
+  // Drawdown tracking
+  current_dd_pct: decimal("current_dd_pct", { precision: 10, scale: 4 }).default("0").notNull(),
+  max_dd_pct: decimal("max_dd_pct", { precision: 10, scale: 4 }).default("0").notNull(),
+  
+  // R-based loss tracking per pair (JSON map: symbol -> loss in R units)
+  loss_in_r_by_pair: jsonb("loss_in_r_by_pair").default({}).notNull(),
+  
+  // Daily counters
+  trades_today: integer("trades_today").default(0).notNull(),
+  positions_open: integer("positions_open").default(0).notNull(),
+  
+  // Circuit breaker states
+  cb_pair_triggered: jsonb("cb_pair_triggered").default({}).notNull(), // symbol -> boolean
+  cb_daily_triggered: boolean("cb_daily_triggered").default(false).notNull(),
+  cb_campaign_triggered: boolean("cb_campaign_triggered").default(false).notNull(),
+  cb_cooldown_until: timestamp("cb_cooldown_until"),
+  
+  // Current tradable set (symbols in the operatable subset)
+  current_tradable_set: text("current_tradable_set").array().default([]).notNull(),
+  
+  // Scheduler timestamps
+  last_rebalance_ts: timestamp("last_rebalance_ts"),
+  last_audit_ts: timestamp("last_audit_ts"),
+  last_daily_reset_ts: timestamp("last_daily_reset_ts"),
+  
+  updated_at: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_campaign_risk_campaign").on(table.campaign_id),
+  index("idx_campaign_risk_cb_daily").on(table.cb_daily_triggered),
+  index("idx_campaign_risk_cb_campaign").on(table.cb_campaign_triggered),
+]);
+
+// Campaign Asset Universe - tracks assets assigned to each campaign
+export const campaign_asset_universes = pgTable("campaign_asset_universes", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+  symbol: text("symbol").notNull(),
+  
+  // Weight and ranking
+  initial_weight: decimal("initial_weight", { precision: 10, scale: 6 }),
+  current_weight: decimal("current_weight", { precision: 10, scale: 6 }),
+  
+  // Status tracking
+  is_active: boolean("is_active").default(true).notNull(),
+  is_in_tradable_set: boolean("is_in_tradable_set").default(false).notNull(),
+  
+  // Scoring data (from last rebalance)
+  last_score: decimal("last_score", { precision: 10, scale: 4 }),
+  last_rank: integer("last_rank"),
+  cluster_number: integer("cluster_number"),
+  
+  // Problem tracking
+  is_problematic: boolean("is_problematic").default(false).notNull(),
+  problem_reason: text("problem_reason"),
+  
+  // Timestamps
+  last_rebalance_at: timestamp("last_rebalance_at"),
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  updated_at: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_campaign_universe_campaign").on(table.campaign_id),
+  index("idx_campaign_universe_symbol").on(table.symbol),
+  index("idx_campaign_universe_active").on(table.is_active),
+  index("idx_campaign_universe_tradable").on(table.is_in_tradable_set),
+  uniqueIndex("idx_campaign_universe_unique").on(table.campaign_id, table.symbol),
+]);
+
+// Campaign Daily Report - 24h audit report per campaign
+export const campaign_daily_reports = pgTable("campaign_daily_reports", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+  report_date: timestamp("report_date").notNull(),
+  
+  // Trade performance metrics
+  trades_count: integer("trades_count").default(0).notNull(),
+  winning_trades: integer("winning_trades").default(0).notNull(),
+  losing_trades: integer("losing_trades").default(0).notNull(),
+  hit_rate: decimal("hit_rate", { precision: 10, scale: 4 }),
+  
+  // Payoff and expectancy
+  avg_win: decimal("avg_win", { precision: 20, scale: 2 }),
+  avg_loss: decimal("avg_loss", { precision: 20, scale: 2 }),
+  payoff_ratio: decimal("payoff_ratio", { precision: 10, scale: 4 }),
+  expectancy: decimal("expectancy", { precision: 20, scale: 2 }),
+  
+  // PnL
+  pnl_day: decimal("pnl_day", { precision: 20, scale: 2 }).default("0").notNull(),
+  pnl_cumulative: decimal("pnl_cumulative", { precision: 20, scale: 2 }).default("0").notNull(),
+  pnl_day_pct: decimal("pnl_day_pct", { precision: 10, scale: 4 }),
+  
+  // Risk metrics
+  dd_current: decimal("dd_current", { precision: 10, scale: 4 }),
+  dd_max: decimal("dd_max", { precision: 10, scale: 4 }),
+  var_95: decimal("var_95", { precision: 20, scale: 2 }),
+  es_95: decimal("es_95", { precision: 20, scale: 2 }),
+  
+  // Costs
+  avg_slippage: decimal("avg_slippage", { precision: 10, scale: 6 }),
+  fees_total: decimal("fees_total", { precision: 20, scale: 8 }).default("0").notNull(),
+  funding_total: decimal("funding_total", { precision: 20, scale: 8 }).default("0").notNull(),
+  
+  // Circuit breaker activity
+  cb_pair_triggers: integer("cb_pair_triggers").default(0).notNull(),
+  cb_daily_trigger: boolean("cb_daily_trigger").default(false).notNull(),
+  cb_campaign_trigger: boolean("cb_campaign_trigger").default(false).notNull(),
+  
+  // Problematic assets
+  problematic_assets: text("problematic_assets").array().default([]).notNull(),
+  
+  // Notes and alerts
+  notes: text("notes"),
+  risk_alerts: jsonb("risk_alerts").default([]).notNull(),
+  
+  created_at: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_campaign_report_campaign").on(table.campaign_id),
+  index("idx_campaign_report_date").on(table.report_date),
+  uniqueIndex("idx_campaign_report_unique").on(table.campaign_id, table.report_date),
+]);
+
+// Campaign Orders - orders specific to a campaign (isolated order book)
+export const campaign_orders = pgTable("campaign_orders", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+  internal_order_id: varchar("internal_order_id").notNull(),
+  exchange_order_id: text("exchange_order_id"),
+  
+  symbol: text("symbol").notNull(),
+  side: text("side").notNull(), // buy, sell
+  order_type: text("order_type").notNull(), // market, limit, stop_loss, take_profit, oco
+  
+  // Order details
+  quantity: decimal("quantity", { precision: 20, scale: 8 }).notNull(),
+  price: decimal("price", { precision: 20, scale: 8 }),
+  stop_price: decimal("stop_price", { precision: 20, scale: 8 }),
+  limit_price: decimal("limit_price", { precision: 20, scale: 8 }),
+  
+  // OCO linking
+  oco_group_id: varchar("oco_group_id"),
+  is_sl_order: boolean("is_sl_order").default(false).notNull(),
+  is_tp_order: boolean("is_tp_order").default(false).notNull(),
+  
+  // Status tracking
+  status: text("status").notNull(), // pending, open, filled, partially_filled, cancelled, expired, rejected
+  filled_quantity: decimal("filled_quantity", { precision: 20, scale: 8 }).default("0").notNull(),
+  average_fill_price: decimal("average_fill_price", { precision: 20, scale: 8 }),
+  
+  // Fees and costs
+  fees: decimal("fees", { precision: 20, scale: 8 }).default("0").notNull(),
+  slippage: decimal("slippage", { precision: 20, scale: 8 }).default("0").notNull(),
+  
+  // Reason for cancellation/rejection
+  cancel_reason: text("cancel_reason"),
+  
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  updated_at: timestamp("updated_at").defaultNow().notNull(),
+  filled_at: timestamp("filled_at"),
+}, (table) => [
+  index("idx_campaign_orders_campaign").on(table.campaign_id),
+  index("idx_campaign_orders_symbol").on(table.symbol),
+  index("idx_campaign_orders_status").on(table.status),
+  index("idx_campaign_orders_oco").on(table.oco_group_id),
+  index("idx_campaign_orders_created").on(table.created_at),
+]);
+
+// Campaign Positions - positions specific to a campaign (isolated position book)
+export const campaign_positions = pgTable("campaign_positions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+  
+  symbol: text("symbol").notNull(),
+  side: text("side").notNull(), // long, short
+  
+  // Position sizing
+  quantity: decimal("quantity", { precision: 20, scale: 8 }).notNull(),
+  entry_price: decimal("entry_price", { precision: 20, scale: 8 }).notNull(),
+  current_price: decimal("current_price", { precision: 20, scale: 8 }).notNull(),
+  
+  // OCO levels (mandatory)
+  stop_loss: decimal("stop_loss", { precision: 20, scale: 8 }).notNull(),
+  take_profit: decimal("take_profit", { precision: 20, scale: 8 }).notNull(),
+  
+  // ATR context at entry (for R calculation)
+  atr_at_entry: decimal("atr_at_entry", { precision: 20, scale: 8 }),
+  risk_amount: decimal("risk_amount", { precision: 20, scale: 2 }), // Entry - SL in USD (1R)
+  
+  // Position adds tracking
+  adds_count: integer("adds_count").default(0).notNull(),
+  avg_entry_price: decimal("avg_entry_price", { precision: 20, scale: 8 }),
+  
+  // PnL tracking
+  unrealized_pnl: decimal("unrealized_pnl", { precision: 20, scale: 2 }).default("0").notNull(),
+  unrealized_pnl_pct: decimal("unrealized_pnl_pct", { precision: 10, scale: 4 }).default("0").notNull(),
+  realized_pnl: decimal("realized_pnl", { precision: 20, scale: 2 }).default("0").notNull(),
+  
+  // Lifecycle
+  state: text("state").notNull(), // open, closing, closed
+  close_reason: text("close_reason"), // sl_hit, tp_hit, signal_exit, rebalance_exit, breaker_exit, manual
+  
+  opened_at: timestamp("opened_at").defaultNow().notNull(),
+  closed_at: timestamp("closed_at"),
+  updated_at: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_campaign_positions_campaign").on(table.campaign_id),
+  index("idx_campaign_positions_symbol").on(table.symbol),
+  index("idx_campaign_positions_state").on(table.state),
+  index("idx_campaign_positions_opened").on(table.opened_at),
+]);
+
 // Monte Carlo Scenarios - individual stress test scenarios
 export const monte_carlo_scenarios = pgTable("monte_carlo_scenarios", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -1203,3 +1503,86 @@ export const insertMonteCarloScenarioSchema = createInsertSchema(monte_carlo_sce
 });
 export type InsertMonteCarloScenario = z.infer<typeof insertMonteCarloScenarioSchema>;
 export type MonteCarloScenario = typeof monte_carlo_scenarios.$inferSelect;
+
+// ========== MULTI-CAMPAIGN ENGINE ZOD SCHEMAS ==========
+
+// Campaign Risk State
+export const insertCampaignRiskStateSchema = createInsertSchema(campaign_risk_states).omit({
+  id: true,
+  updated_at: true,
+});
+export type InsertCampaignRiskState = z.infer<typeof insertCampaignRiskStateSchema>;
+export type CampaignRiskState = typeof campaign_risk_states.$inferSelect;
+
+// Campaign Asset Universe
+export const insertCampaignAssetUniverseSchema = createInsertSchema(campaign_asset_universes).omit({
+  id: true,
+  created_at: true,
+  updated_at: true,
+});
+export type InsertCampaignAssetUniverse = z.infer<typeof insertCampaignAssetUniverseSchema>;
+export type CampaignAssetUniverse = typeof campaign_asset_universes.$inferSelect;
+
+// Campaign Daily Report
+export const insertCampaignDailyReportSchema = createInsertSchema(campaign_daily_reports).omit({
+  id: true,
+  created_at: true,
+});
+export type InsertCampaignDailyReport = z.infer<typeof insertCampaignDailyReportSchema>;
+export type CampaignDailyReport = typeof campaign_daily_reports.$inferSelect;
+
+// Campaign Orders
+export const insertCampaignOrderSchema = createInsertSchema(campaign_orders).omit({
+  id: true,
+  created_at: true,
+  updated_at: true,
+  filled_at: true,
+});
+export type InsertCampaignOrder = z.infer<typeof insertCampaignOrderSchema>;
+export type CampaignOrder = typeof campaign_orders.$inferSelect;
+
+// Campaign Positions
+export const insertCampaignPositionSchema = createInsertSchema(campaign_positions).omit({
+  id: true,
+  opened_at: true,
+  closed_at: true,
+  updated_at: true,
+});
+export type InsertCampaignPosition = z.infer<typeof insertCampaignPositionSchema>;
+export type CampaignPosition = typeof campaign_positions.$inferSelect;
+
+// ========== ROBOT ACTIVITY LOGS (Real-time Trading Feed) ==========
+
+// Robot Activity Logs - stores real-time robot decisions and explanations
+export const robot_activity_logs = pgTable("robot_activity_logs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+  
+  // Event classification
+  event_type: text("event_type").notNull(), // signal_analysis, position_open, position_close, circuit_breaker, rebalance, error, info
+  severity: text("severity").notNull().default("info"), // info, warning, success, error
+  
+  // Symbol context (optional, for trading events)
+  symbol: text("symbol"),
+  
+  // Human-readable message (translation key or direct text)
+  message_key: text("message_key").notNull(), // Translation key for i18n
+  
+  // Technical details (for detailed view)
+  details: jsonb("details"), // { atr, ema12, ema36, signal, slAtr, tpAtr, price, side, quantity, pnl, etc. }
+  
+  // Timestamps
+  created_at: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_robot_activity_campaign").on(table.campaign_id),
+  index("idx_robot_activity_type").on(table.event_type),
+  index("idx_robot_activity_created").on(table.created_at),
+  index("idx_robot_activity_symbol").on(table.symbol),
+]);
+
+export const insertRobotActivityLogSchema = createInsertSchema(robot_activity_logs).omit({
+  id: true,
+  created_at: true,
+});
+export type InsertRobotActivityLog = z.infer<typeof insertRobotActivityLogSchema>;
+export type RobotActivityLog = typeof robot_activity_logs.$inferSelect;
