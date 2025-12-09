@@ -27,13 +27,46 @@ export function AppSidebar() {
   const isAdmin = adminStatus?.isAdmin ?? false;
 
   const menuItems = [
-    // SETUP: Preparação do ambiente de trading
+    // VISÃO GERAL
     {
       title: t('nav.dashboard'),
       url: "/",
       icon: LayoutDashboard,
       testId: "link-dashboard",
     },
+    // CAMPANHAS
+    {
+      title: t('campaign.title'),
+      url: "/campaigns",
+      icon: Calendar,
+      testId: "link-campaigns",
+    },
+    {
+      title: t('wizard.menuItem'),
+      url: "/campaigns/new",
+      icon: PlusCircle,
+      testId: "link-campaign-wizard",
+    },
+    // ANÁLISE DE MERCADO
+    {
+      title: "Market Data",
+      url: "/market-data",
+      icon: Activity,
+      testId: "link-market-data",
+    },
+    {
+      title: t('nav.news'),
+      url: "/news",
+      icon: Newspaper,
+      testId: "link-news",
+    },
+    {
+      title: "Signals",
+      url: "/signals",
+      icon: Radio,
+      testId: "link-signals",
+    },
+    // CONFIGURAÇÃO DE TRADING
     {
       title: t('nav.assets'),
       url: "/assets",
@@ -52,32 +85,7 @@ export function AppSidebar() {
       icon: AlertCircle,
       testId: "link-circuit-breakers",
     },
-    // ANÁLISE: Inteligência e contexto de mercado
-    {
-      title: "Signals",
-      url: "/signals",
-      icon: Radio,
-      testId: "link-signals",
-    },
-    {
-      title: "AI Assistant",
-      url: "/ai",
-      icon: Sparkles,
-      testId: "link-ai-assistant",
-    },
-    {
-      title: t('nav.news'),
-      url: "/news",
-      icon: Newspaper,
-      testId: "link-news",
-    },
-    {
-      title: "Market Data",
-      url: "/market-data",
-      icon: Activity,
-      testId: "link-market-data",
-    },
-    // EXECUÇÃO: Operações de trading
+    // EXECUÇÃO
     {
       title: t('nav.trading'),
       url: "/trading",
@@ -90,7 +98,13 @@ export function AppSidebar() {
       icon: LineChart,
       testId: "link-positions",
     },
-    // MONITORAMENTO: Acompanhamento pós-trade
+    {
+      title: t('nav.operations'),
+      url: "/operations",
+      icon: Clock,
+      testId: "link-operations",
+    },
+    // PORTFÓLIOS
     {
       title: t('nav.portfolios'),
       url: "/portfolios",
@@ -103,11 +117,12 @@ export function AppSidebar() {
       icon: BarChart3,
       testId: "link-performance",
     },
+    // ANÁLISE E COMPLIANCE
     {
-      title: t('nav.operations'),
-      url: "/operations",
-      icon: Clock,
-      testId: "link-operations",
+      title: t('nav.backtest'),
+      url: "/backtest",
+      icon: History,
+      testId: "link-backtest",
     },
     {
       title: t('nav.audit'),
@@ -116,30 +131,19 @@ export function AppSidebar() {
       testId: "link-audit",
     },
     {
-      title: t('nav.backtest'),
-      url: "/backtest",
-      icon: History,
-      testId: "link-backtest",
-    },
-    {
-      title: t('campaign.title'),
-      url: "/campaigns",
-      icon: Calendar,
-      testId: "link-campaigns",
-    },
-    {
-      title: t('wizard.menuItem'),
-      url: "/campaigns/new",
-      icon: PlusCircle,
-      testId: "link-campaign-wizard",
-    },
-    {
       title: t('costs.title'),
       url: "/costs-taxes",
       icon: Receipt,
       testId: "link-costs-taxes",
     },
-    // ADMIN: Configurações
+    // FERRAMENTAS
+    {
+      title: "AI Assistant",
+      url: "/ai",
+      icon: Sparkles,
+      testId: "link-ai-assistant",
+    },
+    // SISTEMA
     {
       title: t('nav.settings'),
       url: "/settings",
