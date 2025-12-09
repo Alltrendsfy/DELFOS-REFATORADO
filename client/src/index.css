@@ -244,22 +244,26 @@
 
 /* Trading-specific utility classes */
 @layer utilities {
-  /* 3D Logo Animation */
-  @keyframes rotate3d {
+  /* 3D Logo Animation - Static with hover effect */
+  @keyframes logoHoverPulse {
     0% {
-      transform: rotateY(0deg) rotateX(0deg);
+      transform: rotateY(0deg) scale(1);
     }
     50% {
-      transform: rotateY(180deg) rotateX(5deg);
+      transform: rotateY(15deg) scale(1.05);
     }
     100% {
-      transform: rotateY(360deg) rotateX(0deg);
+      transform: rotateY(0deg) scale(1);
     }
   }
 
   .logo-3d-rotate {
-    animation: rotate3d 8s ease-in-out infinite;
     transform-style: preserve-3d;
+    transition: transform 0.3s ease-out;
+  }
+
+  .logo-3d-rotate:hover {
+    animation: logoHoverPulse 0.8s ease-in-out;
   }
 
   .logo-3d-container {
@@ -267,11 +271,11 @@
     transform-style: preserve-3d;
   }
 
-  /* Accessibility: Pause animation for users who prefer reduced motion */
+  /* Accessibility: No animation for users who prefer reduced motion */
   @media (prefers-reduced-motion: reduce) {
-    .logo-3d-rotate {
+    .logo-3d-rotate:hover {
       animation: none;
-      transform: none;
+      transform: scale(1.02);
     }
   }
 
