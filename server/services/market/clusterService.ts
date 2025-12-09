@@ -115,23 +115,17 @@ class ClusterService {
   }
 
   /**
-   * Apply PCA preprocessing (feature normalization via centering)
+   * Apply Min-Max normalization (0-1 range)
    * 
-   * MVP IMPLEMENTATION:
-   * - Performs mean-centering (zero-mean normalization)
-   * - Does NOT perform eigenvalue decomposition
-   * - Does NOT reduce dimensionality
-   * - Returns centered features (same dimensionality as input)
+   * IMPLEMENTATION:
+   * - Normalizes each feature to [0, 1] range
+   * - Uses Min-Max scaling: (x - min) / (max - min)
+   * - Handles edge case where all values are the same
    * 
    * RATIONALE:
-   * - Centering improves K-means convergence by removing bias
-   * - Simpler than full PCA for MVP with 2D features (rank, score)
-   * - Dimensionality reduction not needed: already compact features
-   * 
-   * PRODUCTION TODO (if scaling to high-D features):
-   * - Add eigenvalue decomposition using `ml-pca` library
-   * - Reduce to principal components (e.g., 10D → 2D)
-   * - Return actual explained variance ratios
+   * - Min-Max normalization is required by specification
+   * - Better for K-means when features have different scales
+   * - Preserves relative distances between data points
    */
   private applyPCA(data: number[][]): number[][] {
     if (data.length === 0) {
@@ -141,20 +135,24 @@ class ClusterService {
     const n = data.length;
     const d = data[0].length;
 
-    // Center the data (subtract mean from each feature)
-    const means = new Array(d).fill(0);
+    const mins = new Array(d).fill(Infinity);
+    const maxs = new Array(d).fill(-Infinity);
+
     for (let j = 0; j < d; j++) {
       for (let i = 0; i < n; i++) {
-        means[j] += data[i][j];
+        mins[j] = Math.min(mins[j], data[i][j]);
+        maxs[j] = Math.max(maxs[j], data[i][j]);
       }
-      means[j] /= n;
     }
 
-    const centered = data.map(row =>
-      row.map((val, j) => val - means[j])
+    const normalized = data.map(row =>
+      row.map((val, j) => {
+        const range = maxs[j] - mins[j];
+        return range === 0 ? 0 : (val - mins[j]) / range;
+      })
     );
 
-    return centered;
+    return normalized;
   }
 
   /**
