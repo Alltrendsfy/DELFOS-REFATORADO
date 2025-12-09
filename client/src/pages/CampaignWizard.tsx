@@ -104,13 +104,24 @@ interface AICampaignSummary {
   timestamp: string;
 }
 
+interface RiskProfile {
+  id: string;
+  profile_code: string;
+  profile_name: string;
+  risk_per_trade_pct: string;
+  max_drawdown_30d_pct: string;
+  max_open_positions: number;
+  max_trades_per_day: number;
+  tp_atr_multiplier: string;
+  max_cluster_risk_pct: string;
+}
+
 const STEPS = [
-  { id: 1, key: 'market_brief', icon: Activity },
-  { id: 2, key: 'basics', icon: Wallet },
-  { id: 3, key: 'mode', icon: Zap },
-  { id: 4, key: 'portfolio', icon: Target },
-  { id: 5, key: 'risk', icon: Shield },
-  { id: 6, key: 'review', icon: Rocket },
+  { id: 1, key: 'basics', icon: Wallet },
+  { id: 2, key: 'mode', icon: Zap },
+  { id: 3, key: 'portfolio', icon: Target },
+  { id: 4, key: 'risk', icon: Shield },
+  { id: 5, key: 'review', icon: Rocket },
 ];
 
 export default function CampaignWizard() {
@@ -127,6 +138,7 @@ export default function CampaignWizard() {
     tradingMode: 'paper',
     portfolioId: '',
     portfolioName: '',
+    investorProfile: 'M',
     maxDrawdown: 10,
     enableCircuitBreakers: true,
   });
@@ -147,6 +159,12 @@ export default function CampaignWizard() {
     staleTime: 30000,
     refetchInterval: 60000,
   });
+
+  const { data: riskProfiles, isLoading: riskProfilesLoading } = useQuery<RiskProfile[]>({
+    queryKey: ['/api/risk-profiles'],
+  });
+
+  const selectedProfile = riskProfiles?.find(p => p.profile_code === formData.investorProfile);
 
   const [aiSuggestion, setAiSuggestion] = useState<AISuggestion | null>(null);
   const [isLoadingAI, setIsLoadingAI] = useState(false);
@@ -171,8 +189,8 @@ export default function CampaignWizard() {
           tradingMode: formData.tradingMode,
           portfolioName: formData.portfolioName,
           maxDrawdown: formData.maxDrawdown,
-          marketStatus: marketBrief?.overallStatus,
-          volatilityLevel: marketBrief?.volatility?.level,
+          marketStatus: marketBrief?.overallStatus || 'unknown',
+          volatilityLevel: marketBrief?.volatility?.level || 'moderate',
         },
         language
       });
@@ -256,7 +274,7 @@ export default function CampaignWizard() {
   };
 
   useEffect(() => {
-    if (currentStep === 6 && !aiSummary && !isLoadingAISummary) {
+    if (currentStep === 5 && !aiSummary && !isLoadingAISummary) {
       fetchAISummary();
     }
   }, [currentStep]);
@@ -297,8 +315,6 @@ export default function CampaignWizard() {
   const validateStep = (step: number): boolean => {
     switch (step) {
       case 1:
-        return true;
-      case 2:
         if (!formData.name.trim()) {
           toast({ title: t('wizard.validation.nameRequired'), variant: 'destructive' });
           return false;
@@ -308,17 +324,19 @@ export default function CampaignWizard() {
           return false;
         }
         return true;
-      case 3:
+      case 2:
         if (formData.tradingMode === 'live' && !isKrakenValid) {
           toast({ title: t('wizard.validation.krakenRequired'), variant: 'destructive' });
           return false;
         }
         return true;
-      case 4:
+      case 3:
         if (!formData.portfolioId) {
           toast({ title: t('wizard.validation.portfolioRequired'), variant: 'destructive' });
           return false;
         }
+        return true;
+      case 4:
         return true;
       case 5:
         return true;
@@ -329,7 +347,7 @@ export default function CampaignWizard() {
 
   const handleNext = () => {
     if (validateStep(currentStep)) {
-      setCurrentStep(prev => Math.min(prev + 1, 6));
+      setCurrentStep(prev => Math.min(prev + 1, 5));
     }
   };
 
@@ -370,13 +388,18 @@ export default function CampaignWizard() {
     const campaignData = {
       portfolio_id: formData.portfolioId,
       name: formData.name,
+      investor_profile: formData.investorProfile,
       start_date: startDate.toISOString(),
       end_date: endDate.toISOString(),
       initial_capital: formData.initialCapital,
       current_equity: formData.initialCapital,
       max_drawdown_percentage: (-formData.maxDrawdown).toString(),
       status: 'active',
-      risk_config: {
+      risk_config: selectedProfile ? {
+        ...selectedProfile,
+        maxDrawdown: formData.maxDrawdown,
+        circuitBreakersEnabled: formData.enableCircuitBreakers,
+      } : {
         maxDrawdown: formData.maxDrawdown,
         circuitBreakersEnabled: formData.enableCircuitBreakers,
       },
@@ -466,149 +489,6 @@ export default function CampaignWizard() {
         <CardContent>
           {currentStep === 1 && (
             <div className="space-y-6">
-              {marketBriefLoading ? (
-                <div className="space-y-4">
-                  <Skeleton className="h-24 w-full" />
-                  <Skeleton className="h-16 w-full" />
-                  <Skeleton className="h-16 w-full" />
-                </div>
-              ) : marketBrief ? (
-                <>
-                  <div className={`p-4 rounded-lg border-2 ${
-                    marketBrief.overallStatus === 'healthy' ? 'border-green-500/30 bg-green-500/5' :
-                    marketBrief.overallStatus === 'warning' ? 'border-yellow-500/30 bg-yellow-500/5' :
-                    'border-red-500/30 bg-red-500/5'
-                  }`}>
-                    <div className="flex items-center justify-between mb-3">
-                      <div className={`flex items-center gap-2 ${getMarketStatusColor(marketBrief.overallStatus)}`}>
-                        {getMarketStatusIcon(marketBrief.overallStatus)}
-                        <span className="font-medium text-lg">
-                          {t(`wizard.market.status.${marketBrief.overallStatus}`)}
-                        </span>
-                      </div>
-                      <Button 
-                        variant="ghost" 
-                        size="sm"
-                        onClick={() => refetchMarketBrief()}
-                        data-testid="button-refresh-market"
-                      >
-                        <RefreshCw className="w-4 h-4" />
-                      </Button>
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                      {marketBrief.recommendation}
-                    </p>
-                  </div>
-
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="p-4 rounded-lg bg-muted/50">
-                      <div className="flex items-center gap-2 text-muted-foreground mb-2">
-                        <BarChart3 className="w-4 h-4" />
-                        {t('wizard.market.dataQuality')}
-                      </div>
-                      <div className="space-y-2">
-                        <div className="flex justify-between items-center">
-                          <span className="text-sm">{t('wizard.market.activeSymbols')}</span>
-                          <Badge variant="secondary">{marketBrief.dataQuality?.activeSymbols ?? 0}</Badge>
-                        </div>
-                        <div className="flex justify-between items-center">
-                          <span className="text-sm">{t('wizard.market.staleness')}</span>
-                          <span className="text-sm font-mono">
-                            {(marketBrief.dataQuality?.avgStaleness ?? 0).toFixed(1)}s
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="p-4 rounded-lg bg-muted/50">
-                      <div className="flex items-center gap-2 text-muted-foreground mb-2">
-                        {marketBrief.volatility?.level === 'high' ? (
-                          <TrendingUp className="w-4 h-4" />
-                        ) : marketBrief.volatility?.level === 'low' ? (
-                          <TrendingDown className="w-4 h-4" />
-                        ) : (
-                          <Activity className="w-4 h-4" />
-                        )}
-                        {t('wizard.market.volatility')}
-                      </div>
-                      <div className="space-y-2">
-                        <div className="flex justify-between items-center">
-                          <span className="text-sm">{t('wizard.market.avgVolatility')}</span>
-                          <Badge variant={
-                            marketBrief.volatility?.level === 'high' ? 'destructive' :
-                            marketBrief.volatility?.level === 'low' ? 'secondary' : 'outline'
-                          }>
-                            {((marketBrief.volatility?.marketAvg ?? 0) * 100).toFixed(2)}%
-                          </Badge>
-                        </div>
-                        <div className="flex justify-between items-center">
-                          <span className="text-sm">{t('wizard.market.level')}</span>
-                          <span className="text-sm capitalize">{marketBrief.volatility?.level ?? 'normal'}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="p-4 rounded-lg bg-muted/50">
-                    <div className="flex items-center gap-2 text-muted-foreground mb-2">
-                      <Shield className="w-4 h-4" />
-                      {t('wizard.market.circuitBreakers')}
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <div className="flex items-center gap-2">
-                        {marketBrief.circuitBreakers?.tradingAllowed ? (
-                          <CheckCircle className="w-4 h-4 text-green-500" />
-                        ) : (
-                          <AlertCircle className="w-4 h-4 text-red-500" />
-                        )}
-                        <span className="text-sm">
-                          {marketBrief.circuitBreakers?.tradingAllowed 
-                            ? t('wizard.market.tradingAllowed')
-                            : t('wizard.market.tradingBlocked')
-                          }
-                        </span>
-                      </div>
-                      <Badge variant={
-                        marketBrief.circuitBreakers?.stalenessLevel === 'normal' ? 'secondary' :
-                        marketBrief.circuitBreakers?.stalenessLevel === 'warn' ? 'outline' : 'destructive'
-                      }>
-                        {(marketBrief.circuitBreakers?.stalenessLevel ?? 'normal').toUpperCase()}
-                      </Badge>
-                    </div>
-                  </div>
-
-                  {(marketBrief.volatility?.topVolatile?.length ?? 0) > 0 && (
-                    <div className="p-4 rounded-lg border border-muted">
-                      <h4 className="text-sm font-medium mb-3">{t('wizard.market.topVolatile')}</h4>
-                      <div className="flex flex-wrap gap-2">
-                        {marketBrief.volatility?.topVolatile?.slice(0, 5).map((asset) => (
-                          <Badge key={asset.symbol} variant="outline">
-                            {asset.symbol} ({((asset.volatility ?? 0) * 100).toFixed(1)}%)
-                          </Badge>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="text-center py-8">
-                  <AlertCircle className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-                  <p className="text-muted-foreground">{t('wizard.market.noData')}</p>
-                  <Button 
-                    variant="outline" 
-                    onClick={() => refetchMarketBrief()}
-                    className="mt-4"
-                    data-testid="button-retry-market"
-                  >
-                    {t('common.retry')}
-                  </Button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {currentStep === 2 && (
-            <div className="space-y-6">
               <div className="space-y-2">
                 <Label htmlFor="campaign-name">{t('wizard.campaignName')}</Label>
                 <Input
@@ -618,6 +498,50 @@ export default function CampaignWizard() {
                   value={formData.name}
                   onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
                 />
+              </div>
+
+              <div className="space-y-4">
+                <Label className="text-base font-medium">{t('wizard.selectProfile')}</Label>
+                {riskProfilesLoading ? (
+                  <div className="flex gap-3">
+                    <Skeleton className="h-20 flex-1" />
+                    <Skeleton className="h-20 flex-1" />
+                    <Skeleton className="h-20 flex-1" />
+                  </div>
+                ) : riskProfiles && riskProfiles.length > 0 ? (
+                  <div className="grid grid-cols-3 gap-3">
+                    {riskProfiles.map((profile) => (
+                      <div
+                        key={profile.profile_code}
+                        className={`relative p-3 rounded-lg border-2 cursor-pointer transition-all text-center ${
+                          formData.investorProfile === profile.profile_code
+                            ? 'border-primary bg-primary/5'
+                            : 'border-muted hover-elevate'
+                        }`}
+                        onClick={() => {
+                          setFormData(prev => ({
+                            ...prev,
+                            investorProfile: profile.profile_code,
+                            maxDrawdown: Math.abs(parseFloat(profile.max_drawdown_30d_pct))
+                          }));
+                        }}
+                        data-testid={`profile-option-${profile.profile_code}`}
+                      >
+                        <Badge variant={
+                          profile.profile_code === 'C' ? 'secondary' :
+                          profile.profile_code === 'M' ? 'outline' : 'destructive'
+                        } className="mb-2">
+                          {profile.profile_code === 'C' ? t('wizard.risk.conservative') :
+                           profile.profile_code === 'M' ? t('wizard.risk.moderate') :
+                           t('wizard.risk.aggressive')}
+                        </Badge>
+                        <div className="text-xs text-muted-foreground">
+                          {t('wizard.riskPerTrade')}: {profile.risk_per_trade_pct}%
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
 
               <div className="space-y-2">
@@ -659,7 +583,7 @@ export default function CampaignWizard() {
             </div>
           )}
 
-          {currentStep === 3 && (
+          {currentStep === 2 && (
             <div className="space-y-6">
               <RadioGroup
                 value={formData.tradingMode}
@@ -741,7 +665,7 @@ export default function CampaignWizard() {
             </div>
           )}
 
-          {currentStep === 4 && (
+          {currentStep === 3 && (
             <div className="space-y-6">
               {portfoliosLoading ? (
                 <div className="flex items-center justify-center py-8">
@@ -823,7 +747,7 @@ export default function CampaignWizard() {
             </div>
           )}
 
-          {currentStep === 5 && (
+          {currentStep === 4 && (
             <div className="space-y-6">
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
@@ -938,7 +862,7 @@ export default function CampaignWizard() {
             </div>
           )}
 
-          {currentStep === 6 && (
+          {currentStep === 5 && (
             <div className="space-y-6">
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="p-4 rounded-lg bg-muted/50">
@@ -1109,7 +1033,7 @@ export default function CampaignWizard() {
           {t('wizard.previous')}
         </Button>
 
-        {currentStep < 6 ? (
+        {currentStep < 5 ? (
           <Button
             onClick={handleNext}
             data-testid="button-next"
