@@ -39,6 +39,7 @@ import Backtest from "@/pages/Backtest";
 import Admin from "@/pages/Admin";
 import Campaigns from "@/pages/Campaigns";
 import CampaignWizard from "@/pages/CampaignWizard";
+import CampaignDetail from "@/pages/CampaignDetail";
 import NotFound from "@/pages/not-found";
 
 function ThemeToggle() {
@@ -136,6 +137,7 @@ function AuthenticatedApp() {
               <Route path="/backtest" component={Backtest} />
               <Route path="/campaigns" component={Campaigns} />
               <Route path="/campaigns/new" component={CampaignWizard} />
+              <Route path="/campaigns/:id" component={CampaignDetail} />
               <Route path="/settings" component={Settings} />
               <Route path="/admin" component={Admin} />
               <Route component={NotFound} />
