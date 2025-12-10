@@ -46,12 +46,12 @@ class StalenessGuardService {
   constructor() {
     this.dataIngestion = new DataIngestionService();
     
-    // Adjusted thresholds to accommodate REST fallback batching (Item 7 modification)
+    // Adjusted thresholds to accommodate Kraken WebSocket cadence (~5-6s between ticks)
     // Original: warn 3s, hard 10s, kill 60s
-    // Updated: warn 4s (allows batching ~3.5s), hard 12s, kill 60s (unchanged)
+    // Updated: warn 8s (allows WS ~6s cadence + margin), hard 15s, kill 60s (unchanged)
     this.config = {
-      warnThresholdSeconds: 4,
-      hardThresholdSeconds: 12,
+      warnThresholdSeconds: 8,
+      hardThresholdSeconds: 15,
       killSwitchSeconds: 60,
     };
   }
@@ -189,33 +189,40 @@ class StalenessGuardService {
       };
     }
 
-    // Check L1 data staleness (most critical for trading)
-    const l1Status = await this.checkDataStaleness(exchange, symbol, 'l1');
+    // Check both L1 and L2 data - use the freshest one to avoid false positives
+    // Some assets receive L2 orderbook updates more frequently than L1 trades
+    const [l1Status, l2Status] = await Promise.all([
+      this.checkDataStaleness(exchange, symbol, 'l1'),
+      this.checkDataStaleness(exchange, symbol, 'l2'),
+    ]);
+    
+    // Use whichever data source is freshest (lowest age)
+    const status = l1Status.ageSeconds < l2Status.ageSeconds ? l1Status : l2Status;
 
-    if (l1Status.level === 'kill_switch') {
+    if (status.level === 'kill_switch') {
       return {
         allowed: false,
-        reason: `Data too stale (${l1Status.ageSeconds.toFixed(1)}s > ${this.config.killSwitchSeconds}s) - kill switch`,
-        stalenessLevel: l1Status.level,
-        ageSeconds: l1Status.ageSeconds,
+        reason: `Data too stale (${status.ageSeconds.toFixed(1)}s > ${this.config.killSwitchSeconds}s) - kill switch`,
+        stalenessLevel: status.level,
+        ageSeconds: status.ageSeconds,
       };
     }
 
-    if (l1Status.level === 'hard') {
+    if (status.level === 'hard') {
       return {
         allowed: false,
-        reason: `Data stale (${l1Status.ageSeconds.toFixed(1)}s > ${this.config.hardThresholdSeconds}s) - hard limit`,
-        stalenessLevel: l1Status.level,
-        ageSeconds: l1Status.ageSeconds,
+        reason: `Data stale (${status.ageSeconds.toFixed(1)}s > ${this.config.hardThresholdSeconds}s) - hard limit`,
+        stalenessLevel: status.level,
+        ageSeconds: status.ageSeconds,
       };
     }
 
-    if (l1Status.level === 'warn') {
+    if (status.level === 'warn') {
       return {
         allowed: false,
-        reason: `Data staleness warning (${l1Status.ageSeconds.toFixed(1)}s > ${this.config.warnThresholdSeconds}s) - blocking new positions`,
-        stalenessLevel: l1Status.level,
-        ageSeconds: l1Status.ageSeconds,
+        reason: `Data staleness warning (${status.ageSeconds.toFixed(1)}s > ${this.config.warnThresholdSeconds}s) - blocking new positions`,
+        stalenessLevel: status.level,
+        ageSeconds: status.ageSeconds,
       };
     }
 
@@ -223,12 +230,20 @@ class StalenessGuardService {
     return {
       allowed: true,
       stalenessLevel: 'fresh',
-      ageSeconds: l1Status.ageSeconds,
+      ageSeconds: status.ageSeconds,
     };
   }
 
   async shouldZeroSignals(exchange: string, symbol: string): Promise<boolean> {
-    const status = await this.checkDataStaleness(exchange, symbol, 'l1');
+    // Check both L1 and L2 data - use the freshest one to avoid false positives
+    // Some assets receive L2 orderbook updates more frequently than L1 trades
+    const [l1Status, l2Status] = await Promise.all([
+      this.checkDataStaleness(exchange, symbol, 'l1'),
+      this.checkDataStaleness(exchange, symbol, 'l2'),
+    ]);
+    
+    // Use whichever data source is freshest (lowest age)
+    const status = l1Status.ageSeconds < l2Status.ageSeconds ? l1Status : l2Status;
     return status.level === 'hard' || status.level === 'kill_switch';
   }
 
