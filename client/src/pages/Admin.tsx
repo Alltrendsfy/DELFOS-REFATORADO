@@ -25,8 +25,10 @@ import {
   Upload,
   Loader2,
   CheckCircle,
-  AlertCircle
+  AlertCircle,
+  BookOpen
 } from 'lucide-react';
+import AdminManual from '@/components/AdminManual';
 import { format } from 'date-fns';
 
 interface PlatformStats {
@@ -379,7 +381,7 @@ export default function Admin() {
       </div>
 
       <Tabs defaultValue="emails" className="space-y-4">
-        <TabsList className="grid w-full grid-cols-5 max-w-2xl">
+        <TabsList className="grid w-full grid-cols-6 max-w-3xl">
           <TabsTrigger value="emails" data-testid="tab-emails">
             <Mail className="h-4 w-4 mr-2" />
             {t('admin.emails_title')}
@@ -399,6 +401,10 @@ export default function Admin() {
           <TabsTrigger value="backup" data-testid="tab-backup">
             <Github className="h-4 w-4 mr-2" />
             Backup
+          </TabsTrigger>
+          <TabsTrigger value="manual" data-testid="tab-manual">
+            <BookOpen className="h-4 w-4 mr-2" />
+            Manual
           </TabsTrigger>
         </TabsList>
 
@@ -982,6 +988,10 @@ export default function Admin() {
               )}
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="manual" className="space-y-4">
+          <AdminManual />
         </TabsContent>
       </Tabs>
     </div>
