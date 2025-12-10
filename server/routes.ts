@@ -5691,6 +5691,107 @@ Provide your analysis as valid JSON.`;
     }
   });
 
+  // Campaign Reports - Robot Status (Estado Operacional)
+  app.get('/api/campaigns/:id/robot-status', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const { campaignReportService } = await import('./services/campaignReportService');
+      const status = await campaignReportService.getRobotStatus(id);
+      
+      if (!status) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      
+      res.json(status);
+    } catch (error: any) {
+      console.error("Error fetching robot status:", error);
+      res.status(500).json({ message: "Failed to fetch robot status" });
+    }
+  });
+
+  // Campaign Reports - 8 Hour Report
+  app.get('/api/campaigns/:id/report/8h', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const { campaignReportService } = await import('./services/campaignReportService');
+      const report = await campaignReportService.getReport8h(id);
+      
+      if (!report) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      
+      res.json(report);
+    } catch (error: any) {
+      console.error("Error fetching 8h report:", error);
+      res.status(500).json({ message: "Failed to fetch 8h report" });
+    }
+  });
+
+  // Campaign Reports - 24 Hour Report (Daily)
+  app.get('/api/campaigns/:id/report/24h', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const { campaignReportService } = await import('./services/campaignReportService');
+      const report = await campaignReportService.getReport24h(id);
+      
+      if (!report) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      
+      res.json(report);
+    } catch (error: any) {
+      console.error("Error fetching 24h report:", error);
+      res.status(500).json({ message: "Failed to fetch 24h report" });
+    }
+  });
+
+  // Campaign Reports - Trade History
+  app.get('/api/campaigns/:id/history', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const { hours = '72' } = req.query;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const { campaignReportService } = await import('./services/campaignReportService');
+      const history = await campaignReportService.getHistory(id, parseInt(hours as string));
+      
+      if (!history) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      
+      res.json(history);
+    } catch (error: any) {
+      console.error("Error fetching trade history:", error);
+      res.status(500).json({ message: "Failed to fetch trade history" });
+    }
+  });
+
   // Clusters - Get by campaign
   app.get('/api/clusters/:campaignId', isAuthenticated, async (req: any, res) => {
     try {
