@@ -32,6 +32,7 @@ The frontend is built with React 18, TypeScript, and Vite, utilizing Wouter for 
 - **Campaign Model:** Automated 30-day trading campaigns with lifecycle management, investor profiles (Conservative, Moderate, Aggressive) defining risk parameters, a 7-step wizard, daily compounding, and a -10% drawdown circuit breaker.
 - **Campaign Engine:** Autonomous multi-campaign trading with isolated robots, independent 5-second cycles, isolated risk state, isolated positions/orders with mandatory OCO linking, three-layer circuit breakers, and daily/8-hour/24-hour resets/audits.
 - **Robot Activity Feed:** Real-time logging system for monitoring trading robot decisions and actions in Campaign Detail pages, with various activity types, detailed metadata, and internationalization.
+- **Robot Reporting System:** Multi-level reporting for campaigns with 4 report types: operational status (real-time robot state, tradable assets, circuit breakers), 8-hour reports (recent performance summary), 24-hour daily reports (ROI, win rate, key decisions), and complete trade history with accumulated PnL tracking.
 - **User Settings:** Manages user profiles, language/theme preferences, and securely stores encrypted Kraken API credentials.
 - **Time-Series Data Backend:** Provides REST API endpoints for bars, orders, and decision logs.
 - **API Token Authentication:** Supports external agent authentication with `delfos_` prefixed tokens, granular permissions, secure storage, audit trails, and expiration support.
