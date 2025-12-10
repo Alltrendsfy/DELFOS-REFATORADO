@@ -1423,6 +1423,12 @@ export const campaign_positions = pgTable("campaign_positions", {
   unrealized_pnl_pct: decimal("unrealized_pnl_pct", { precision: 10, scale: 4 }).default("0").notNull(),
   realized_pnl: decimal("realized_pnl", { precision: 20, scale: 2 }).default("0").notNull(),
   
+  // Slippage tracking (for audit metrics)
+  estimated_entry_price: decimal("estimated_entry_price", { precision: 20, scale: 8 }), // Price at signal generation
+  actual_fill_price: decimal("actual_fill_price", { precision: 20, scale: 8 }), // Actual execution price
+  entry_slippage_bps: decimal("entry_slippage_bps", { precision: 10, scale: 4 }).default("0"), // Basis points slippage
+  exit_slippage_bps: decimal("exit_slippage_bps", { precision: 10, scale: 4 }).default("0"), // Basis points slippage on exit
+  
   // Lifecycle
   state: text("state").notNull(), // open, closing, closed
   close_reason: text("close_reason"), // sl_hit, tp_hit, signal_exit, rebalance_exit, breaker_exit, manual
