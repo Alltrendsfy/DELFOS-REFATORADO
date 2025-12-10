@@ -10,6 +10,27 @@ interface IndicatorResult {
   volatility30d: number | null;
 }
 
+// Synthetic ATR percentages by asset category (approximations based on typical volatility)
+const SYNTHETIC_ATR_PCT: Record<string, number> = {
+  'BTC': 0.015,   // 1.5% ATR typical for BTC
+  'ETH': 0.018,   // 1.8% ATR typical for ETH
+  'SOL': 0.025,   // 2.5% ATR typical for SOL
+  'XRP': 0.022,   // 2.2% ATR typical for XRP
+  'ADA': 0.022,   // Similar to XRP
+  'DOGE': 0.03,   // 3% ATR typical for memecoins
+  'SHIB': 0.035,
+  'PEPE': 0.04,   // 4% ATR typical for smaller memecoins  
+  'BONK': 0.04,
+  'WIF': 0.045,
+  'FLOKI': 0.04,
+  'DEFAULT': 0.025, // 2.5% default for unknown assets
+};
+
+function getSyntheticAtrPct(symbol: string): number {
+  const base = symbol.split('/')[0].toUpperCase();
+  return SYNTHETIC_ATR_PCT[base] || SYNTHETIC_ATR_PCT['DEFAULT'];
+}
+
 function safeParseFloat(value: string): number {
   const parsed = parseFloat(value);
   if (isNaN(parsed)) {
@@ -123,9 +144,16 @@ class IndicatorService {
         10000 // Max limit for 30 days of 1m data
       );
 
-      // Graceful fallback: if insufficient data, return nulls
+      // Graceful fallback: if insufficient bar data, use synthetic indicators from L1 price
       // ATR14 needs 15 bars, EMA36 needs 36 bars
       if (bars.length < 37) {
+        // Try to get real-time price for synthetic indicator calculation
+        const syntheticResult = await this.computeSyntheticIndicators(symbol);
+        if (syntheticResult) {
+          console.log(`📊 Using synthetic indicators for ${symbol.symbol} (only ${bars.length} bars)`);
+          return syntheticResult;
+        }
+        
         console.warn(`⚠️ Insufficient bars for ${symbol.symbol}: ${bars.length} (need 37+)`);
         return {
           atr14: null,
@@ -235,6 +263,51 @@ class IndicatorService {
 
     // Annualized volatility (assuming 365 days)
     return volatility * Math.sqrt(365);
+  }
+
+  /**
+   * Compute synthetic indicators using real-time L1 price when historical bars are insufficient.
+   * Uses typical ATR percentages based on asset category and current price for EMA approximation.
+   * This enables trading to start immediately while historical data accumulates.
+   */
+  private async computeSyntheticIndicators(symbol: Symbol): Promise<IndicatorResult | null> {
+    try {
+      // Get real-time price from L1 quote
+      const l1Quote = await dataIngestionService.getL1Quote(symbol.exchange_id, symbol.symbol);
+      if (!l1Quote) {
+        return null;
+      }
+
+      const bidPrice = parseFloat(l1Quote.bid_price);
+      const askPrice = parseFloat(l1Quote.ask_price);
+      
+      if (isNaN(bidPrice) || isNaN(askPrice) || bidPrice <= 0 || askPrice <= 0) {
+        return null;
+      }
+
+      const midPrice = (bidPrice + askPrice) / 2;
+      
+      // Calculate synthetic ATR based on typical volatility for this asset type
+      const atrPct = getSyntheticAtrPct(symbol.symbol);
+      const syntheticAtr = midPrice * atrPct;
+      
+      // For EMA, use current price as approximation (neutral trend assumption)
+      // Apply small random offset (±0.1%) to prevent all assets triggering simultaneously
+      const microOffset = 1 + (Math.random() - 0.5) * 0.002; // ±0.1%
+      const syntheticEma12 = midPrice * microOffset;
+      const syntheticEma36 = midPrice * (1 / microOffset); // Inverse offset
+      
+      return {
+        atr14: syntheticAtr,
+        ema12: syntheticEma12,
+        ema36: syntheticEma36,
+        volume7d: 0, // Unknown without historical data
+        volatility30d: atrPct * 100, // Approximate
+      };
+    } catch (error) {
+      console.warn(`⚠️ Failed to compute synthetic indicators for ${symbol.symbol}:`, error);
+      return null;
+    }
   }
 }
 
