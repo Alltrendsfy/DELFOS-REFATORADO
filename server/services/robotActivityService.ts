@@ -8,16 +8,19 @@ export type Severity = 'info' | 'warning' | 'success' | 'error';
 export interface SignalDetails {
   price: number;
   atr: number;
-  atrPct: number;
+  atrPct?: number;
   ema12: number;
   ema36: number;
   signal: 'LONG' | 'SHORT' | 'NEUTRAL';
-  slAtr: number;
-  tpAtr: number;
+  slAtr?: number;
+  tpAtr?: number;
+  sl?: number;
+  tp1?: number;
   stopLoss?: number;
   takeProfit?: number;
   side?: 'long' | 'short';
   quantity?: number;
+  reason?: string;
 }
 
 export interface PositionDetails {
@@ -30,6 +33,7 @@ export interface PositionDetails {
   pnl?: number;
   pnlPct?: number;
   closeReason?: string;
+  riskAmount?: number;
 }
 
 export interface CircuitBreakerDetails {
