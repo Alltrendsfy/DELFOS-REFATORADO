@@ -53,6 +53,7 @@ import { useLanguage } from "@/contexts/LanguageContext";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { RobotActivityFeed } from "@/components/RobotActivityFeed";
+import { CampaignReports } from "@/components/CampaignReports";
 
 interface Campaign {
   id: string;
@@ -907,12 +908,7 @@ export default function CampaignDetail() {
         </TabsContent>
 
         <TabsContent value="reports">
-          <Card>
-            <CardContent className="py-12 text-center">
-              <BarChart3 className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-              <p className="text-muted-foreground">{t('campaignDetail.reports.comingSoon')}</p>
-            </CardContent>
-          </Card>
+          {campaignId && <CampaignReports campaignId={campaignId} />}
         </TabsContent>
       </Tabs>
     </div>
