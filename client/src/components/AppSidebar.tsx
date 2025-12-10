@@ -1,4 +1,4 @@
-import { LayoutDashboard, Sparkles, TrendingUp, BarChart3, Wallet, Shield, AlertCircle, Newspaper, Settings, LogOut, Target, Radio, Receipt, Activity, Clock, ClipboardCheck, History, ShieldCheck, Calendar, LineChart, PlusCircle } from "lucide-react";
+import { LayoutDashboard, Sparkles, Wallet, Shield, Settings, LogOut, Activity, ClipboardCheck, History, ShieldCheck, Calendar } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -34,18 +34,12 @@ export function AppSidebar() {
       icon: LayoutDashboard,
       testId: "link-dashboard",
     },
-    // CAMPANHAS
+    // CAMPANHAS (consolidado - Nova Campanha agora é botão interno)
     {
       title: t('campaign.title'),
       url: "/campaigns",
       icon: Calendar,
       testId: "link-campaigns",
-    },
-    {
-      title: t('wizard.menuItem'),
-      url: "/campaigns/new",
-      icon: PlusCircle,
-      testId: "link-campaign-wizard",
     },
     // ANÁLISE DE MERCADO
     {
@@ -54,68 +48,19 @@ export function AppSidebar() {
       icon: Activity,
       testId: "link-market-data",
     },
-    {
-      title: t('nav.news'),
-      url: "/news",
-      icon: Newspaper,
-      testId: "link-news",
-    },
-    {
-      title: "Signals",
-      url: "/signals",
-      icon: Radio,
-      testId: "link-signals",
-    },
-    // CONFIGURAÇÃO DE TRADING
-    {
-      title: t('nav.assets'),
-      url: "/assets",
-      icon: Target,
-      testId: "link-assets",
-    },
+    // Gestão de Risco (consolidado - Circuit Breakers agora é aba interna)
     {
       title: t('nav.risk'),
       url: "/risk",
       icon: Shield,
       testId: "link-risk",
     },
-    {
-      title: "Circuit Breakers",
-      url: "/circuit-breakers",
-      icon: AlertCircle,
-      testId: "link-circuit-breakers",
-    },
-    // EXECUÇÃO
-    {
-      title: t('nav.trading'),
-      url: "/trading",
-      icon: TrendingUp,
-      testId: "link-trading",
-    },
-    {
-      title: t('nav.positions'),
-      url: "/positions",
-      icon: LineChart,
-      testId: "link-positions",
-    },
-    {
-      title: t('nav.operations'),
-      url: "/operations",
-      icon: Clock,
-      testId: "link-operations",
-    },
-    // PORTFÓLIOS
+    // PORTFÓLIOS (consolidado - Desempenho agora é aba interna)
     {
       title: t('nav.portfolios'),
       url: "/portfolios",
       icon: Wallet,
       testId: "link-portfolios",
-    },
-    {
-      title: t('nav.performance'),
-      url: "/performance",
-      icon: BarChart3,
-      testId: "link-performance",
     },
     // ANÁLISE E COMPLIANCE
     {
@@ -124,17 +69,12 @@ export function AppSidebar() {
       icon: History,
       testId: "link-backtest",
     },
+    // Auditoria & Compliance (consolidado - Custos e Impostos agora é aba interna)
     {
       title: t('nav.audit'),
       url: "/audit",
       icon: ClipboardCheck,
       testId: "link-audit",
-    },
-    {
-      title: t('costs.title'),
-      url: "/costs-taxes",
-      icon: Receipt,
-      testId: "link-costs-taxes",
     },
     // FERRAMENTAS
     {
