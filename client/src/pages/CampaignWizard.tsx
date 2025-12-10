@@ -160,9 +160,51 @@ export default function CampaignWizard() {
     refetchInterval: 60000,
   });
 
-  const { data: riskProfiles, isLoading: riskProfilesLoading } = useQuery<RiskProfile[]>({
+  // Fallback risk profiles in case API fails
+  const fallbackProfiles: RiskProfile[] = [
+    {
+      id: 'fallback-c',
+      profile_code: 'C',
+      profile_name: 'Conservador',
+      risk_per_trade_pct: '0.20',
+      max_drawdown_30d_pct: '8.00',
+      max_open_positions: 5,
+      max_trades_per_day: 15,
+      tp_atr_multiplier: '1.50',
+      max_cluster_risk_pct: '6.00',
+    },
+    {
+      id: 'fallback-m',
+      profile_code: 'M',
+      profile_name: 'Moderado',
+      risk_per_trade_pct: '0.50',
+      max_drawdown_30d_pct: '12.00',
+      max_open_positions: 10,
+      max_trades_per_day: 30,
+      tp_atr_multiplier: '2.00',
+      max_cluster_risk_pct: '10.00',
+    },
+    {
+      id: 'fallback-a',
+      profile_code: 'A',
+      profile_name: 'Agressivo',
+      risk_per_trade_pct: '1.00',
+      max_drawdown_30d_pct: '20.00',
+      max_open_positions: 20,
+      max_trades_per_day: 60,
+      tp_atr_multiplier: '3.00',
+      max_cluster_risk_pct: '15.00',
+    },
+  ];
+
+  const { data: riskProfilesData, isLoading: riskProfilesLoading, isError: riskProfilesError } = useQuery<RiskProfile[]>({
     queryKey: ['/api/risk-profiles'],
+    retry: 2,
+    staleTime: 60000,
   });
+
+  // Use API profiles if available, otherwise use fallback
+  const riskProfiles = (riskProfilesData && riskProfilesData.length > 0) ? riskProfilesData : fallbackProfiles;
 
   const selectedProfile = riskProfiles?.find(p => p.profile_code === formData.investorProfile);
 
