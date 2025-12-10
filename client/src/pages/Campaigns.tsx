@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useLocation } from "wouter";
+import { useLocation, Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -24,7 +24,8 @@ import {
   Wallet,
   Zap,
   AlertCircle,
-  Trash2
+  Trash2,
+  PlusCircle
 } from "lucide-react";
 import {
   AlertDialog,
@@ -901,6 +902,12 @@ export default function Campaigns() {
           >
             <RefreshCw className="h-4 w-4" />
           </Button>
+          <Link href="/campaigns/new" data-testid="link-new-campaign">
+            <Button data-testid="button-new-campaign">
+              <PlusCircle className="h-4 w-4 mr-2" />
+              {t('wizard.menuItem')}
+            </Button>
+          </Link>
         </div>
       </div>
 
