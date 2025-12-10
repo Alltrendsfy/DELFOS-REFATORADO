@@ -541,7 +541,22 @@ export default function CampaignWizard() {
                       </div>
                     ))}
                   </div>
-                ) : null}
+                ) : (
+                  <div className="p-4 rounded-lg border border-destructive/50 bg-destructive/10 text-center">
+                    <p className="text-sm text-destructive">
+                      {t('wizard.profilesLoadError') || 'Erro ao carregar perfis de risco. Por favor, atualize a página.'}
+                    </p>
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      className="mt-2"
+                      onClick={() => window.location.reload()}
+                      data-testid="button-reload-profiles"
+                    >
+                      {t('wizard.retry') || 'Tentar novamente'}
+                    </Button>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-2">
