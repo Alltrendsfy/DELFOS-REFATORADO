@@ -23,6 +23,7 @@ import { keyRotationService } from "./services/keyRotationService";
 import { assetSelectorService } from "./services/assetSelectorService";
 import { stalenessGuardService } from "./services/stalenessGuardService";
 import { campaignManagerService } from "./services/trading/campaignManagerService";
+import { adminMonitorService } from "./services/adminMonitorService";
 import type { Symbol } from "@shared/schema";
 import { 
   insertOrderSchema, 
@@ -4932,6 +4933,112 @@ Provide your analysis as valid JSON.`;
     }
   });
 
+  // User Dashboard - Global stats across all user campaigns
+  app.get('/api/user/dashboard-stats', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      // Get all portfolios for user
+      const portfolios = await storage.getPortfoliosByUserId(userId);
+      const portfolioIds = portfolios.map(p => p.id);
+      
+      // Get all campaigns for user's portfolios
+      const allCampaigns: any[] = [];
+      for (const portfolio of portfolios) {
+        const campaigns = await storage.getCampaignsByPortfolio(portfolio.id);
+        allCampaigns.push(...campaigns);
+      }
+      
+      // Calculate aggregated stats
+      let totalCapital = 0;
+      let totalEquity = 0;
+      let activeCampaigns = 0;
+      let pausedCampaigns = 0;
+      let completedCampaigns = 0;
+      let atRiskCampaigns = 0;
+      let globalDrawdown = 0;
+      let worstDrawdown = 0;
+      
+      for (const campaign of allCampaigns) {
+        const capital = parseFloat(campaign.initial_capital) || 0;
+        const equity = parseFloat(campaign.current_equity) || 0;
+        const maxDD = parseFloat(campaign.max_drawdown_percentage) || 10;
+        
+        totalCapital += capital;
+        totalEquity += equity;
+        
+        // Calculate campaign drawdown
+        const pnlPct = capital > 0 ? ((equity - capital) / capital) * 100 : 0;
+        const drawdown = pnlPct < 0 ? Math.abs(pnlPct) : 0;
+        
+        if (drawdown > worstDrawdown) {
+          worstDrawdown = drawdown;
+        }
+        
+        // Status counts
+        if (campaign.status === 'active') {
+          activeCampaigns++;
+          // Check if at risk (drawdown > 50% of max allowed)
+          if (drawdown > maxDD * 0.5) {
+            atRiskCampaigns++;
+          }
+        } else if (campaign.status === 'paused') {
+          pausedCampaigns++;
+        } else if (campaign.status === 'completed' || campaign.status === 'stopped') {
+          completedCampaigns++;
+        }
+      }
+      
+      // Global drawdown is worst campaign drawdown
+      globalDrawdown = worstDrawdown;
+      
+      // Calculate total PnL
+      const totalPnL = totalEquity - totalCapital;
+      const totalPnLPercentage = totalCapital > 0 ? (totalPnL / totalCapital) * 100 : 0;
+      
+      // Get today's trades count across all portfolios
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      let todayTradesCount = 0;
+      
+      for (const portfolioId of portfolioIds) {
+        const trades = await storage.getTradesByPortfolioId(portfolioId);
+        const todayTrades = trades.filter(t => {
+          const tradeDate = new Date(t.opened_at);
+          return tradeDate >= today;
+        });
+        todayTradesCount += todayTrades.length;
+      }
+      
+      // Determine overall health status
+      let healthStatus: 'healthy' | 'warning' | 'critical' = 'healthy';
+      if (atRiskCampaigns > 0) {
+        healthStatus = 'warning';
+      }
+      if (globalDrawdown > 8) {
+        healthStatus = 'critical';
+      }
+      
+      res.json({
+        totalCapital,
+        totalEquity,
+        totalPnL,
+        totalPnLPercentage,
+        globalDrawdown,
+        activeCampaigns,
+        pausedCampaigns,
+        completedCampaigns,
+        atRiskCampaigns,
+        totalCampaigns: allCampaigns.length,
+        todayTradesCount,
+        healthStatus,
+      });
+    } catch (error) {
+      console.error("Error fetching dashboard stats:", error);
+      res.status(500).json({ message: "Failed to fetch dashboard stats" });
+    }
+  });
+
   // Campaigns - Get all for user
   app.get('/api/campaigns/all', isAuthenticated, async (req: any, res) => {
     try {
@@ -5034,6 +5141,24 @@ Provide your analysis as valid JSON.`;
       }
 
       const campaign = await storage.createCampaign(validationResult.data);
+      
+      // Create admin alert for new campaign
+      try {
+        const user = await storage.getUser(userId);
+        const portfolioMode = (portfolio as any).mode || 'paper';
+        await adminMonitorService.notifyCampaignCreated(
+          userId,
+          user?.email || 'Unknown',
+          campaign.id,
+          campaign.name,
+          portfolio.id,
+          portfolioMode as 'paper' | 'real',
+          parseFloat(campaign.initial_capital)
+        );
+      } catch (alertError) {
+        console.error('[AdminMonitor] Failed to create campaign alert:', alertError);
+      }
+      
       res.json(campaign);
     } catch (error) {
       console.error("Error creating campaign:", error);
@@ -5983,6 +6108,77 @@ Provide your analysis as valid JSON.`;
     } catch (error) {
       console.error('[ERROR] Failed to get key rotation status:', error);
       res.status(500).json({ message: 'Failed to retrieve key rotation status' });
+    }
+  });
+
+  // ===== ADMIN MONITOR ENDPOINTS (User & Campaign Monitoring) =====
+
+  // Get global metrics for admin dashboard
+  app.get('/api/admin/monitor/global', isAuthenticated, isAdmin, async (_req: any, res) => {
+    try {
+      const metrics = await adminMonitorService.getGlobalMetrics();
+      res.json(metrics);
+    } catch (error) {
+      console.error('[ERROR] Failed to get admin global metrics:', error);
+      res.status(500).json({ message: 'Failed to retrieve global metrics' });
+    }
+  });
+
+  // Get detailed campaign list with user info
+  app.get('/api/admin/monitor/campaigns', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { status, mode, userId, limit, offset } = req.query;
+      const campaigns = await adminMonitorService.getDetailedCampaigns({
+        status: status as string | undefined,
+        mode: mode as string | undefined,
+        userId: userId as string | undefined,
+        limit: limit ? parseInt(limit as string, 10) : undefined,
+        offset: offset ? parseInt(offset as string, 10) : undefined,
+      });
+      res.json(campaigns);
+    } catch (error) {
+      console.error('[ERROR] Failed to get admin campaign details:', error);
+      res.status(500).json({ message: 'Failed to retrieve campaign details' });
+    }
+  });
+
+  // Get admin alerts
+  app.get('/api/admin/monitor/alerts', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { unreadOnly, limit } = req.query;
+      const alerts = await adminMonitorService.getAlerts({
+        unreadOnly: unreadOnly === 'true',
+        limit: limit ? parseInt(limit as string) : 50,
+      });
+      res.json(alerts);
+    } catch (error) {
+      console.error('[ERROR] Failed to get admin alerts:', error);
+      res.status(500).json({ message: 'Failed to retrieve alerts' });
+    }
+  });
+
+  // Mark single alert as read
+  app.post('/api/admin/monitor/alerts/:id/read', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const adminUserId = req.user.claims.sub;
+      await adminMonitorService.markAlertAsRead(id, adminUserId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[ERROR] Failed to mark alert as read:', error);
+      res.status(500).json({ message: 'Failed to mark alert as read' });
+    }
+  });
+
+  // Mark all alerts as read
+  app.post('/api/admin/monitor/alerts/mark-all-read', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const adminUserId = req.user.claims.sub;
+      const count = await adminMonitorService.markAllAlertsAsRead(adminUserId);
+      res.json({ success: true, markedCount: count });
+    } catch (error) {
+      console.error('[ERROR] Failed to mark all alerts as read:', error);
+      res.status(500).json({ message: 'Failed to mark all alerts as read' });
     }
   });
 
