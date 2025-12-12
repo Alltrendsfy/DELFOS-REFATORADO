@@ -26,9 +26,11 @@ import {
   Loader2,
   CheckCircle,
   AlertCircle,
-  BookOpen
+  BookOpen,
+  Eye
 } from 'lucide-react';
 import AdminManual from '@/components/AdminManual';
+import AdminMonitor from '@/components/AdminMonitor';
 import { format } from 'date-fns';
 
 interface PlatformStats {
@@ -380,8 +382,12 @@ export default function Admin() {
         </Card>
       </div>
 
-      <Tabs defaultValue="emails" className="space-y-4">
-        <TabsList className="grid w-full grid-cols-6 max-w-3xl">
+      <Tabs defaultValue="monitor" className="space-y-4">
+        <TabsList className="grid w-full grid-cols-7 max-w-4xl">
+          <TabsTrigger value="monitor" data-testid="tab-monitor">
+            <Eye className="h-4 w-4 mr-2" />
+            Monitor
+          </TabsTrigger>
           <TabsTrigger value="emails" data-testid="tab-emails">
             <Mail className="h-4 w-4 mr-2" />
             {t('admin.emails_title')}
@@ -407,6 +413,10 @@ export default function Admin() {
             Manual
           </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="monitor" className="space-y-4">
+          <AdminMonitor />
+        </TabsContent>
 
         <TabsContent value="emails" className="space-y-4">
           <Card>
