@@ -8,6 +8,7 @@ import memoize from "memoizee";
 import connectPg from "connect-pg-simple";
 import createMemoryStore from "memorystore";
 import { storage } from "./storage";
+import { adminMonitorService } from "./services/adminMonitorService";
 
 const getOidcConfig = memoize(
   async () => {
@@ -28,7 +29,7 @@ export function getSession() {
   const sessionStore = new PgStore({
     conString: process.env.DATABASE_URL,
     tableName: 'sessions',
-    createTableIfMissing: false, // Table already exists from Drizzle schema
+    createTableIfMissing: true, // Auto-create table if missing in production
     ttl: sessionTtl / 1000, // convert to seconds
   });
   
@@ -84,6 +85,13 @@ async function upsertUser(claims: any) {
     } catch (error) {
       console.error(`[AUTH] Error checking authorized email:`, error);
     }
+  }
+  
+  // Create admin alert for user login
+  try {
+    await adminMonitorService.notifyUserLogin(userId, userEmail || 'Unknown');
+  } catch (alertError) {
+    console.error('[AdminMonitor] Failed to create login alert:', alertError);
   }
 }
 
