@@ -215,6 +215,69 @@ export default function CampaignWizard() {
   const [aiSummary, setAiSummary] = useState<AICampaignSummary | null>(null);
   const [isLoadingAISummary, setIsLoadingAISummary] = useState(false);
 
+  // Inline portfolio creation state
+  const [newPortfolioName, setNewPortfolioName] = useState('');
+  const [newPortfolioMode, setNewPortfolioMode] = useState<'paper' | 'live'>('paper');
+
+  // Mutation for creating portfolio inline
+  const createPortfolioMutation = useMutation({
+    mutationFn: async (data: { name: string; trading_mode: string }) => {
+      const response = await fetch('/api/portfolios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        credentials: 'include'
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+      }
+      return await response.json();
+    },
+    onSuccess: (newPortfolio: Portfolio) => {
+      toast({
+        title: t('wizard.success'),
+        description: t('wizard.portfolioCreated'),
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/portfolios'] });
+      // Auto-select the newly created portfolio
+      // Only set tradingMode to 'live' if user has valid Kraken credentials
+      const newMode = (newPortfolio.trading_mode === 'live' && isKrakenValid) 
+        ? 'live' 
+        : 'paper';
+      setFormData(prev => ({
+        ...prev,
+        portfolioId: newPortfolio.id,
+        portfolioName: newPortfolio.name,
+        tradingMode: newMode,
+      }));
+      // Reset inline form
+      setNewPortfolioName('');
+      setNewPortfolioMode('paper');
+    },
+    onError: (error: any) => {
+      toast({
+        title: t('common.error'),
+        description: error?.message || t('wizard.portfolioCreateError'),
+        variant: 'destructive',
+      });
+    },
+  });
+
+  const handleCreatePortfolioInline = () => {
+    if (!newPortfolioName.trim()) {
+      toast({
+        title: t('wizard.validation.nameRequired'),
+        variant: 'destructive',
+      });
+      return;
+    }
+    createPortfolioMutation.mutate({
+      name: newPortfolioName.trim(),
+      trading_mode: newPortfolioMode,
+    });
+  };
+
   const fetchStepAdvice = async (step: string) => {
     if (isLoadingStepAdvice) return;
     
@@ -367,9 +430,14 @@ export default function CampaignWizard() {
         }
         return true;
       case 2:
+        // Allow advancing even without Kraken credentials - user will be guided in step 3
+        // The final validation happens at campaign creation time
         if (formData.tradingMode === 'live' && !isKrakenValid) {
-          toast({ title: t('wizard.validation.krakenRequired'), variant: 'destructive' });
-          return false;
+          toast({ 
+            title: t('wizard.krakenInvalid'), 
+            description: t('wizard.configureKraken'),
+          });
+          // Still allow to proceed - they might create a Paper portfolio instead
         }
         return true;
       case 3:
@@ -790,15 +858,105 @@ export default function CampaignWizard() {
                   )}
                 </>
               ) : (
-                <div className="text-center py-8">
-                  <Target className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-                  <p className="text-muted-foreground mb-4">{t('wizard.noPortfolios')}</p>
-                  <Button 
-                    onClick={() => setLocation('/portfolios')}
-                    data-testid="button-create-portfolio"
-                  >
-                    {t('wizard.createPortfolio')}
-                  </Button>
+                <div className="space-y-6">
+                  <div className="text-center py-4">
+                    <Target className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+                    <p className="text-muted-foreground">{t('wizard.noPortfolios')}</p>
+                  </div>
+
+                  <div className="p-6 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 space-y-4">
+                    <h3 className="font-medium text-lg flex items-center gap-2">
+                      <Wallet className="w-5 h-5 text-primary" />
+                      {t('wizard.createPortfolioInline')}
+                    </h3>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="new-portfolio-name">{t('wizard.portfolioName')}</Label>
+                      <Input
+                        id="new-portfolio-name"
+                        data-testid="input-new-portfolio-name"
+                        placeholder={t('wizard.portfolioNamePlaceholder')}
+                        value={newPortfolioName}
+                        onChange={(e) => setNewPortfolioName(e.target.value)}
+                        disabled={createPortfolioMutation.isPending}
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>{t('wizard.selectTradingMode')}</Label>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div
+                          className={`p-3 rounded-lg border-2 cursor-pointer transition-all text-center
+                            ${newPortfolioMode === 'paper' ? 'border-primary bg-primary/5' : 'border-muted hover-elevate'}
+                          `}
+                          onClick={() => setNewPortfolioMode('paper')}
+                          data-testid="option-paper-mode"
+                        >
+                          <Badge variant="secondary" className="mb-2">PAPER</Badge>
+                          <p className="text-sm text-muted-foreground">{t('wizard.noRiskBadge')}</p>
+                        </div>
+                        <div
+                          className={`p-3 rounded-lg border-2 transition-all text-center
+                            ${!isKrakenValid ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                            ${newPortfolioMode === 'live' && isKrakenValid ? 'border-primary bg-primary/5' : 'border-muted hover-elevate'}
+                          `}
+                          onClick={() => isKrakenValid && setNewPortfolioMode('live')}
+                          data-testid="option-live-mode"
+                        >
+                          <Badge variant="default" className="mb-2">LIVE</Badge>
+                          <p className="text-sm text-muted-foreground">{t('wizard.realMoneyBadge')}</p>
+                          {!isKrakenValid && (
+                            <p className="text-xs text-yellow-600 mt-1">{t('wizard.krakenInvalid')}</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {newPortfolioMode === 'live' && isKrakenValid && (
+                      <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/30">
+                        <div className="flex items-center gap-2 text-green-600 text-sm">
+                          <CheckCircle className="w-4 h-4" />
+                          <span>{t('wizard.krakenValid')}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {!isKrakenValid && (
+                      <div className="p-3 rounded-lg bg-muted/50 border border-muted">
+                        <div className="flex items-center gap-2 text-muted-foreground text-sm">
+                          <Info className="w-4 h-4" />
+                          <span>{t('wizard.krakenInvalid')}</span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-auto p-0 text-primary underline"
+                            onClick={() => setLocation('/settings')}
+                          >
+                            {t('wizard.configureKraken')}
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
+                    <Button
+                      onClick={handleCreatePortfolioInline}
+                      disabled={createPortfolioMutation.isPending || !newPortfolioName.trim() || (newPortfolioMode === 'live' && !isKrakenValid)}
+                      className="w-full"
+                      data-testid="button-create-portfolio-inline"
+                    >
+                      {createPortfolioMutation.isPending ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          {t('wizard.creatingPortfolio')}
+                        </>
+                      ) : (
+                        <>
+                          <Check className="w-4 h-4 mr-2" />
+                          {t('wizard.createPortfolio')}
+                        </>
+                      )}
+                    </Button>
+                  </div>
                 </div>
               )}
             </div>
