@@ -41,6 +41,13 @@ import {
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { GlobalStatsBar } from "@/components/GlobalStatsBar";
+import { EnhancedCampaignCard } from "@/components/EnhancedCampaignCard";
+import { CampaignAlerts } from "@/components/CampaignAlerts";
+import { EquityCurve } from "@/components/EquityCurve";
+import { PositionsPanel } from "@/components/PositionsPanel";
+import { ClusterVisualization } from "@/components/ClusterVisualization";
+import { CampaignReports } from "@/components/CampaignReports";
 
 interface Campaign {
   id: string;
@@ -884,12 +891,19 @@ export default function Campaigns() {
   const totalCampaigns = allCampaigns?.length || 0;
 
   return (
-    <div className="p-6 space-y-6" data-testid="campaigns-page">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div>
-          <h1 className="text-3xl font-bold" data-testid="campaigns-title">{t('campaign.title')}</h1>
-          <p className="text-muted-foreground">{t('campaign.subtitle')}</p>
-        </div>
+    <div className="space-y-0" data-testid="campaigns-page">
+      <GlobalStatsBar />
+      <div className="p-6 space-y-6">
+        {activeCampaigns.length > 0 && (
+          <Card className="p-4">
+            <CampaignAlerts maxAlerts={5} />
+          </Card>
+        )}
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div>
+            <h1 className="text-3xl font-bold" data-testid="campaigns-title">{t('campaign.title')}</h1>
+            <p className="text-muted-foreground">{t('campaign.subtitle')}</p>
+          </div>
         <div className="flex items-center gap-2">
           <Badge variant="outline" className="text-sm" data-testid="campaigns-total-count">
             {totalCampaigns} {totalCampaigns === 1 ? 'campanha' : 'campanhas'}
@@ -948,18 +962,30 @@ export default function Campaigns() {
                       {t('campaign.activeCampaigns')} ({activeCampaigns.length})
                     </h2>
                   </div>
-                  <div className="space-y-4">
+                  <div className="space-y-6">
                     {activeCampaigns.map((campaign) => (
-                      <ActiveCampaignCard
-                        key={campaign.id}
-                        campaign={campaign}
-                        portfolios={portfolios || []}
-                        onPause={(id) => pauseMutation.mutate(id)}
-                        onResume={(id) => resumeMutation.mutate(id)}
-                        onStop={(id) => stopMutation.mutate(id)}
-                        onRebalance={(id) => rebalanceMutation.mutate(id)}
-                        pendingAction={pendingAction}
-                      />
+                      <div key={campaign.id} className="space-y-4">
+                        <EnhancedCampaignCard
+                          campaign={campaign}
+                          portfolios={portfolios || []}
+                          onPause={(id) => pauseMutation.mutate(id)}
+                          onResume={(id) => resumeMutation.mutate(id)}
+                          onStop={(id) => stopMutation.mutate(id)}
+                          onRebalance={(id) => rebalanceMutation.mutate(id)}
+                          pendingAction={pendingAction}
+                        />
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <EquityCurve 
+                            campaignId={campaign.id} 
+                            initialCapital={parseFloat(campaign.initial_capital)} 
+                          />
+                          <PositionsPanel campaignId={campaign.id} />
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <ClusterVisualization campaignId={campaign.id} />
+                          <CampaignReports campaignId={campaign.id} />
+                        </div>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -1014,6 +1040,7 @@ export default function Campaigns() {
           )}
         </>
       )}
+      </div>
     </div>
   );
 }
