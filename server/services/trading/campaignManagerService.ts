@@ -4,6 +4,7 @@ import * as schema from '@shared/schema';
 import { storage } from '../../storage';
 import { observabilityService } from '../observabilityService';
 import { rebalanceService } from '../rebalance/rebalanceService';
+import { campaignEngineService } from './campaignEngineService';
 
 interface CampaignMetrics {
   campaignId: string;
@@ -277,25 +278,56 @@ class CampaignManagerService {
     const endDate = new Date(campaign.end_date);
 
     if (now >= endDate) {
+      console.log(`[CampaignManager] Campaign ${campaignId} has reached end date - initiating liquidation...`);
+      
+      // CRITICAL: Close all open positions BEFORE marking campaign as completed
+      const liquidationResult = await campaignEngineService.closeAllOpenPositions(
+        campaignId, 
+        'campaign_expired'
+      );
+      
+      console.log(`[CampaignManager] Liquidation complete: ${liquidationResult.closedCount} positions closed, PnL: $${liquidationResult.totalPnL.toFixed(2)}`);
+      
+      // Get updated equity after liquidation
+      const [updatedRiskState] = await db.select()
+        .from(schema.campaign_risk_states)
+        .where(eq(schema.campaign_risk_states.campaign_id, campaignId));
+      
+      const finalEquity = updatedRiskState 
+        ? parseFloat(updatedRiskState.current_equity)
+        : parseFloat(campaign.current_equity);
+      
+      // Update campaign equity with liquidation results
+      await storage.updateCampaignEquity(campaignId, finalEquity.toFixed(2));
+      
+      // Now mark campaign as completed
       await storage.completeCampaign(campaignId);
       
       const portfolio = await storage.getPortfolio(campaign.portfolio_id);
       if (portfolio) {
+        const initialCapital = parseFloat(campaign.initial_capital);
+        const pnlPercentage = ((finalEquity - initialCapital) / initialCapital * 100);
+        
         await storage.createAuditLog({
           user_id: portfolio.user_id,
           action_type: 'campaign_completed',
           entity_type: 'campaign',
           entity_id: campaignId,
           details: {
-            final_equity: campaign.current_equity,
+            final_equity: finalEquity.toFixed(2),
             initial_capital: campaign.initial_capital,
             duration_days: CAMPAIGN_DURATION_DAYS,
-            pnl_percentage: ((parseFloat(campaign.current_equity) - parseFloat(campaign.initial_capital)) / parseFloat(campaign.initial_capital) * 100).toFixed(2)
+            pnl_percentage: pnlPercentage.toFixed(2),
+            liquidation: {
+              positions_closed: liquidationResult.closedCount,
+              liquidation_pnl: liquidationResult.totalPnL.toFixed(2),
+              positions: liquidationResult.positions
+            }
           }
         });
       }
 
-      console.log(`[CampaignManager] Campaign ${campaignId} completed - 30 day cycle ended`);
+      console.log(`[CampaignManager] Campaign ${campaignId} completed - Final equity: $${finalEquity.toFixed(2)}`);
       return true;
     }
 
