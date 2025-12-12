@@ -1787,6 +1787,60 @@ class CampaignEngineService {
       fillPrice: null, // Market orders fill immediately but we don't get the price in AddOrder response
     };
   }
+
+  /**
+   * Close all open positions for a campaign (used on campaign expiration)
+   * Returns the total realized PnL from all closed positions
+   */
+  async closeAllOpenPositions(campaignId: string, reason: string = 'campaign_expired'): Promise<{
+    closedCount: number;
+    totalPnL: number;
+    positions: Array<{ symbol: string; pnl: number }>;
+  }> {
+    const openPositions = await db.select().from(schema.campaign_positions)
+      .where(and(
+        eq(schema.campaign_positions.campaign_id, campaignId),
+        eq(schema.campaign_positions.state, 'open')
+      ));
+
+    if (openPositions.length === 0) {
+      console.log(`[CampaignEngine] No open positions to close for campaign ${campaignId}`);
+      return { closedCount: 0, totalPnL: 0, positions: [] };
+    }
+
+    console.log(`[CampaignEngine] 🔒 Closing ${openPositions.length} open positions for campaign ${campaignId} (${reason})`);
+
+    let totalPnL = 0;
+    const closedPositions: Array<{ symbol: string; pnl: number }> = [];
+
+    for (const position of openPositions) {
+      try {
+        const pnl = parseFloat(position.unrealized_pnl);
+        await this.closePosition(campaignId, position.id, reason);
+        totalPnL += pnl;
+        closedPositions.push({ symbol: position.symbol, pnl });
+        console.log(`[CampaignEngine] ✅ Closed ${position.symbol}: PnL $${pnl.toFixed(2)}`);
+      } catch (error) {
+        console.error(`[CampaignEngine] ❌ Failed to close position ${position.id} (${position.symbol}):`, error);
+      }
+    }
+
+    console.log(`[CampaignEngine] 🏁 Campaign ${campaignId} liquidation complete: ${closedPositions.length}/${openPositions.length} positions closed, Total PnL: $${totalPnL.toFixed(2)}`);
+
+    // Log campaign completion activity
+    await robotActivityService.logSystemEvent(campaignId, 'campaign_liquidation', {
+      closedCount: closedPositions.length,
+      totalPnL,
+      positions: closedPositions,
+      reason,
+    });
+
+    return {
+      closedCount: closedPositions.length,
+      totalPnL,
+      positions: closedPositions,
+    };
+  }
 }
 
 export const campaignEngineService = new CampaignEngineService();
