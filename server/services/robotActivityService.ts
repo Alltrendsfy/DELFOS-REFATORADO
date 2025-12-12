@@ -209,6 +209,21 @@ class RobotActivityService {
     await this.log(campaignId, 'error', 'error', messageKey, symbol, { error });
   }
 
+  async logSystemEvent(
+    campaignId: string,
+    eventType: string,
+    details: Record<string, unknown>
+  ): Promise<void> {
+    await this.log(
+      campaignId,
+      'info',
+      'info',
+      `robot.system.${eventType}`,
+      undefined,
+      details
+    );
+  }
+
   async getRecentActivities(
     campaignId: string,
     limit: number = 50,
