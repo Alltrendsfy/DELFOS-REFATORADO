@@ -1592,3 +1592,49 @@ export const insertRobotActivityLogSchema = createInsertSchema(robot_activity_lo
 });
 export type InsertRobotActivityLog = z.infer<typeof insertRobotActivityLogSchema>;
 export type RobotActivityLog = typeof robot_activity_logs.$inferSelect;
+
+// ========== ADMIN ALERTS (User Monitoring System) ==========
+
+// Admin Alerts - stores notifications for admin about user activity
+export const admin_alerts = pgTable("admin_alerts", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  
+  // User who triggered the alert
+  user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
+  
+  // Alert type: user_login, campaign_created_paper, campaign_created_real
+  alert_type: text("alert_type").notNull(),
+  
+  // Alert severity: info, warning, important
+  severity: text("severity").notNull().default("info"),
+  
+  // Related entity (optional)
+  campaign_id: varchar("campaign_id").references(() => campaigns.id, { onDelete: 'set null' }),
+  portfolio_id: varchar("portfolio_id").references(() => portfolios.id, { onDelete: 'set null' }),
+  
+  // Alert details
+  title: text("title").notNull(),
+  message: text("message").notNull(),
+  details: jsonb("details"), // Additional context data
+  
+  // Read status
+  is_read: boolean("is_read").default(false).notNull(),
+  read_at: timestamp("read_at"),
+  read_by: varchar("read_by").references(() => users.id),
+  
+  // Timestamps
+  created_at: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_admin_alerts_user").on(table.user_id),
+  index("idx_admin_alerts_type").on(table.alert_type),
+  index("idx_admin_alerts_created").on(table.created_at),
+  index("idx_admin_alerts_unread").on(table.is_read),
+]);
+
+export const insertAdminAlertSchema = createInsertSchema(admin_alerts).omit({
+  id: true,
+  created_at: true,
+  read_at: true,
+});
+export type InsertAdminAlert = z.infer<typeof insertAdminAlertSchema>;
+export type AdminAlert = typeof admin_alerts.$inferSelect;
