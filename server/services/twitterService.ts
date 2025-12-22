@@ -1,4 +1,5 @@
 import type { IStorage } from '../storage';
+import { externalServiceToggleService } from './externalServiceToggleService';
 
 interface Tweet {
   id: string;
@@ -38,6 +39,13 @@ export class TwitterService {
    * Fetch recent crypto-related tweets from influential accounts and hashtags
    */
   async fetchCryptoNews(maxResults: number = 20): Promise<void> {
+    // Check if service is enabled
+    const isEnabled = await externalServiceToggleService.isServiceEnabled('twitter');
+    if (!isEnabled) {
+      console.log('[Twitter] Service is disabled by admin toggle');
+      throw new Error('Feed de notícias do Twitter está temporariamente desativado.');
+    }
+
     if (!this.bearerToken) {
       throw new Error('Twitter API credentials not configured. Please set TWITTER_BEARER_TOKEN environment variable.');
     }
