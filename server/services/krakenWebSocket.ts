@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { KRAKEN_WS_URL, getKrakenPairsForWebSocket } from "./krakenService";
 import { DataIngestionService } from "./dataIngestionService";
 import { observabilityService } from "./observabilityService";
+import { externalServiceToggleService } from './externalServiceToggleService';
 
 interface KrakenMessage {
   event?: string;
@@ -70,7 +71,19 @@ export class KrakenWebSocketManager {
     this.connectToKraken();
   }
 
-  private connectToKraken() {
+  private async connectToKraken() {
+    // Check if WebSocket service is enabled
+    try {
+      const isEnabled = await externalServiceToggleService.isServiceEnabled('kraken_websocket');
+      if (!isEnabled) {
+        console.log('[KrakenWS] Service is disabled by admin toggle - operating in fallback mode');
+        this.startFallbackRestPolling();
+        return;
+      }
+    } catch (error) {
+      console.warn('[KrakenWS] Toggle service not available, attempting connection anyway');
+    }
+
     if (this.krakenWS) {
       this.krakenWS.close();
     }
