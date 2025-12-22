@@ -37,7 +37,7 @@ export interface PositionDetails {
 }
 
 export interface CircuitBreakerDetails {
-  breakerType: 'pair' | 'daily' | 'campaign';
+  breakerType: 'pair' | 'daily' | 'campaign' | 'var_es';
   threshold: number;
   currentValue: number;
   triggered: boolean;
