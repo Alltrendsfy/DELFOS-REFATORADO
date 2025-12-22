@@ -1,6 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { 
@@ -8,9 +9,12 @@ import {
   TrendingUp, 
   Activity,
   Layers,
-  Zap
+  Zap,
+  RefreshCw
 } from "lucide-react";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { queryClient, apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 
 interface ClusterData {
   cluster: number;
@@ -42,6 +46,7 @@ const CLUSTER_COLORS = [
 
 export function ClusterVisualization({ campaignId }: ClusterVisualizationProps) {
   const { t } = useLanguage();
+  const { toast } = useToast();
 
   const { data: clusterSummary, isLoading, isError } = useQuery<ClusterSummary>({
     queryKey: ['/api/campaigns', campaignId, 'cluster-summary'],
@@ -53,6 +58,43 @@ export function ClusterVisualization({ campaignId }: ClusterVisualizationProps) 
     enabled: !!campaignId,
     refetchInterval: 60000,
     staleTime: 30000,
+  });
+  
+  const refreshClustersMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/campaigns/${campaignId}/refresh-clusters`, { 
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({ message: 'Unknown error' }));
+        throw new Error(error.message || 'Failed to refresh clusters');
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/campaigns', campaignId, 'cluster-summary'] });
+      if (data.clustersCreated > 0) {
+        toast({
+          title: t('cluster.refreshSuccess'),
+          description: `${data.updatedAssets} ${t('cluster.refreshSuccessDesc')}`,
+        });
+      } else {
+        toast({
+          title: t('common.warning'),
+          description: t('cluster.refreshNoChange'),
+          variant: 'destructive',
+        });
+      }
+    },
+    onError: (error: Error) => {
+      toast({
+        title: t('common.error'),
+        description: error.message || t('cluster.refreshError'),
+        variant: 'destructive',
+      });
+    },
   });
 
   if (isLoading) {
@@ -86,9 +128,23 @@ export function ClusterVisualization({ campaignId }: ClusterVisualizationProps) 
   if (!clusterSummary || clusterSummary.clusters.length === 0) {
     return (
       <Card>
-        <CardContent className="p-4 text-center text-muted-foreground">
-          <Layers className="h-8 w-8 mx-auto mb-2 opacity-50" />
+        <CardContent className="p-4 text-center text-muted-foreground space-y-3">
+          <Layers className="h-8 w-8 mx-auto opacity-50" />
           <p className="text-sm">{t('cluster.noData')}</p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => refreshClustersMutation.mutate()}
+            disabled={refreshClustersMutation.isPending}
+            data-testid="button-refresh-clusters"
+          >
+            {refreshClustersMutation.isPending ? (
+              <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4 mr-2" />
+            )}
+            {t('cluster.refreshClusters')}
+          </Button>
         </CardContent>
       </Card>
     );
