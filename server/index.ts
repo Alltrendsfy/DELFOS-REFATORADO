@@ -1,6 +1,9 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { runMigrations } from 'stripe-replit-sync';
+import { getStripeSync } from "./services/payments/stripeClient";
+import { WebhookHandlers } from "./services/payments/webhookHandlers";
 
 const app = express();
 
@@ -9,6 +12,36 @@ declare module 'http' {
     rawBody: unknown
   }
 }
+
+// ========== STRIPE WEBHOOK ROUTE (MUST be registered BEFORE express.json()) ==========
+app.post(
+  '/api/stripe/webhook',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    const signature = req.headers['stripe-signature'];
+
+    if (!signature) {
+      return res.status(400).json({ error: 'Missing stripe-signature' });
+    }
+
+    try {
+      const sig = Array.isArray(signature) ? signature[0] : signature;
+
+      if (!Buffer.isBuffer(req.body)) {
+        console.error('[Stripe Webhook] req.body is not a Buffer');
+        return res.status(500).json({ error: 'Webhook processing error' });
+      }
+
+      await WebhookHandlers.processWebhook(req.body as Buffer, sig);
+      res.status(200).json({ received: true });
+    } catch (error: any) {
+      console.error('[Stripe Webhook] Error:', error.message);
+      res.status(400).json({ error: 'Webhook processing error' });
+    }
+  }
+);
+
+// Now apply JSON middleware for all other routes
 app.use(express.json({
   verify: (req, _res, buf) => {
     req.rawBody = buf;
@@ -57,6 +90,11 @@ app.use((req, res, next) => {
   const { seedSymbols } = await import("./services/shared/seedSymbols");
   await seedSymbols();
   log('[INFO] Critical data seeded');
+  
+  // Initialize External Service Toggle settings (Franchisor Cost Control)
+  const { externalServiceToggleService } = await import("./services/externalServiceToggleService");
+  await externalServiceToggleService.initializeServices();
+  log('[INFO] External service toggles initialized');
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
@@ -143,6 +181,15 @@ app.use((req, res, next) => {
       // Start Data Retention Service (cleanup old data daily)
       dataRetentionService.start();
       
+      // Start Analytics Scheduler Service (VRE, Market Regime, Clusters)
+      try {
+        const { analyticsSchedulerService } = await import("./services/analyticsSchedulerService");
+        await analyticsSchedulerService.start();
+        log('[INFO] Analytics Scheduler started - VRE every 30s, Market Regime every 60s, Clusters every 5min');
+      } catch (analyticsError) {
+        log(`[WARN] Analytics Scheduler failed to start: ${analyticsError}`);
+      }
+      
       log('[INFO] Background services started successfully');
       
       // Start Campaign Engine (autonomous trading robot)
@@ -154,11 +201,48 @@ app.use((req, res, next) => {
         log(`[WARN] Campaign Engine failed to start: ${engineError}`);
       }
       
+      // Start Campaign Manager monitoring (expiration checks, drawdown checks, rebalancing)
+      try {
+        const { campaignManagerService } = await import("./services/trading/campaignManagerService");
+        campaignManagerService.startAll(60000); // Check every 60 seconds
+        log('[INFO] Campaign Manager started - monitoring expirations and rebalancing');
+      } catch (managerError) {
+        log(`[WARN] Campaign Manager failed to start: ${managerError}`);
+      }
+      
+      // ========== STRIPE INITIALIZATION ==========
+      try {
+        log('[INFO] Initializing Stripe schema...');
+        await runMigrations({ 
+          databaseUrl: process.env.DATABASE_URL!,
+          schema: 'stripe'
+        });
+        log('[INFO] Stripe schema ready');
+        
+        const stripeSync = await getStripeSync();
+        
+        const webhookBaseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+        const { webhook } = await stripeSync.findOrCreateManagedWebhook(
+          `${webhookBaseUrl}/api/stripe/webhook`
+        );
+        log(`[INFO] Stripe webhook configured: ${webhook.url}`);
+        
+        stripeSync.syncBackfill()
+          .then(() => log('[INFO] Stripe data synced'))
+          .catch((err: any) => log(`[WARN] Error syncing Stripe data: ${err.message}`));
+      } catch (stripeError: any) {
+        log(`[WARN] Stripe initialization failed: ${stripeError.message || stripeError}`);
+      }
+      
       // Cleanup on shutdown
       process.on('SIGINT', async () => {
         log('[INFO] Shutting down services...');
         const { campaignEngineService } = await import("./services/trading/campaignEngineService");
+        const { campaignManagerService } = await import("./services/trading/campaignManagerService");
+        const { analyticsSchedulerService } = await import("./services/analyticsSchedulerService");
         campaignEngineService.stopMainLoop();
+        campaignManagerService.stopAll();
+        analyticsSchedulerService.stop();
         stalenessGuardService.stop();
         clearInterval(marketDataInterval);
         krakenWsManager.close();
