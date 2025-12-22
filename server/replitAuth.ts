@@ -23,17 +23,21 @@ const getOidcConfig = memoize(
 export function getSession() {
   console.log('[SESSION] Initializing session middleware...');
   const sessionTtl = 7 * 24 * 60 * 60 * 1000; // 1 week
+  const isProduction = process.env.NODE_ENV !== 'development';
   
   // Use PostgreSQL session store for persistence across server restarts
+  // Use the shared pool from db.ts to avoid creating additional connections
+  const { pool } = require('./db');
   const PgStore = connectPg(session);
   const sessionStore = new PgStore({
-    conString: process.env.DATABASE_URL,
+    pool: pool,                  // Use shared pool instead of creating new connection
     tableName: 'sessions',
-    createTableIfMissing: true, // Auto-create table if missing in production
-    ttl: sessionTtl / 1000, // convert to seconds
+    createTableIfMissing: true,  // Auto-create table if missing in production
+    ttl: sessionTtl / 1000,      // convert to seconds
+    pruneSessionInterval: 60 * 15, // Clean expired sessions every 15 minutes
   });
   
-  console.log('[SESSION] Using PostgreSQL session store for persistence');
+  console.log(`[SESSION] Using PostgreSQL session store with shared pool | Production: ${isProduction}`);
   
   return session({
     secret: process.env.SESSION_SECRET!,
@@ -42,7 +46,8 @@ export function getSession() {
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV !== 'development',
+      secure: isProduction, // HTTPS only in production
+      sameSite: isProduction ? 'none' : 'lax', // 'none' required for cross-site cookies in published apps
       maxAge: sessionTtl,
     },
   });
@@ -62,7 +67,22 @@ async function upsertUser(claims: any) {
   const userId = claims["sub"];
   const userEmail = claims["email"];
   
-  // First upsert the user
+  // Check if there's a placeholder user with this email that needs to be merged
+  let placeholderUser: any = null;
+  if (userEmail) {
+    const existingUserByEmail = await storage.getUserByEmail(userEmail);
+    if (existingUserByEmail && existingUserByEmail.id !== userId) {
+      placeholderUser = existingUserByEmail;
+      console.log(`[AUTH] Found placeholder user ${existingUserByEmail.id} to merge into real user ${userId}`);
+    }
+  }
+  
+  // FIRST: Upsert the real user (so FK references can point to it)
+  // If placeholder exists with same email, we need to clear its email first to avoid unique constraint
+  if (placeholderUser) {
+    await storage.clearPlaceholderEmail(placeholderUser.id);
+  }
+  
   await storage.upsertUser({
     id: userId,
     email: userEmail,
@@ -70,6 +90,17 @@ async function upsertUser(claims: any) {
     lastName: claims["last_name"],
     profileImageUrl: claims["profile_image_url"],
   });
+  
+  // THEN: Merge placeholder data after real user exists
+  if (placeholderUser) {
+    try {
+      // Merge placeholder user via storage method (handles all FK updates atomically)
+      await storage.mergePlaceholderUser(placeholderUser.id, userId);
+      console.log(`[AUTH] Successfully merged placeholder user for ${userEmail}`);
+    } catch (mergeError) {
+      console.error(`[AUTH] Error merging placeholder user:`, mergeError);
+    }
+  }
   
   // Check if email is in authorized list and auto-approve if needed
   if (userEmail) {
@@ -168,18 +199,26 @@ export async function setupAuth(app: Express) {
 export const isAuthenticated: RequestHandler = async (req, res, next) => {
   try {
     const user = req.user as any;
+    const requestPath = req.path;
+    const requestMethod = req.method;
+    const requestHost = req.hostname;
 
     // Check if user object exists - required for any authentication
     if (!user) {
-      console.log('[AUTH] No user object in request');
+      console.log(`[AUTH] ❌ No user object | ${requestMethod} ${requestPath} | Host: ${requestHost}`);
       return res.status(401).json({ message: "Unauthorized" });
     }
 
     // Check if user has claims (essential for the app to function)
     if (!user.claims || !user.claims.sub) {
-      console.log('[AUTH] User missing claims or sub - session may be corrupted');
+      console.log(`[AUTH] ❌ Missing claims/sub | ${requestMethod} ${requestPath} | Host: ${requestHost} | Session: ${!!req.session}`);
       return res.status(401).json({ message: "Session expired - please login again" });
     }
+
+    // Log successful authentication with user details
+    const userId = user.claims.sub;
+    const userEmail = user.claims.email || 'unknown';
+    console.log(`[AUTH] ✓ User authenticated | ID: ${userId} | Email: ${userEmail} | ${requestMethod} ${requestPath} | Host: ${requestHost}`);
 
     // If not authenticated but has refresh token, try to refresh
     if (!req.isAuthenticated()) {
