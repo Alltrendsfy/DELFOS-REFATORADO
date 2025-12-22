@@ -47,7 +47,8 @@ import {
   Filter,
   BarChart3,
   Activity,
-  Bot
+  Bot,
+  Banknote
 } from "lucide-react";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useToast } from "@/hooks/use-toast";
@@ -68,6 +69,9 @@ interface Campaign {
   investor_profile: string;
   created_at: string;
   completed_at: string | null;
+  rbm_status?: string | null;
+  rbm_approved?: string | null;
+  rbm_requested?: string | null;
 }
 
 interface CampaignMetrics {
@@ -84,6 +88,17 @@ interface CampaignMetrics {
   isDrawdownBreached: boolean;
   status: string;
   progress: number;
+}
+
+interface RbmEvent {
+  id: string;
+  campaign_id: string;
+  event_type: string;
+  previous_value: string | null;
+  new_value: string | null;
+  trigger_source: string | null;
+  snapshot_data: Record<string, unknown> | null;
+  created_at: string;
 }
 
 interface AssetUniverse {
@@ -148,7 +163,7 @@ const CLUSTER_COLORS = [
 ];
 
 export default function CampaignDetail() {
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
   const { toast } = useToast();
   const [, setLocation] = useLocation();
   const [, params] = useRoute("/campaigns/:id");
@@ -209,6 +224,18 @@ export default function CampaignDetail() {
   const openPositions = positions?.filter(p => p.state === 'open') || [];
   const closedPositions = positions?.filter(p => p.state === 'closed') || [];
 
+  // Fetch RBM events for audit trail
+  const { data: rbmEvents, isLoading: rbmEventsLoading } = useQuery<RbmEvent[]>({
+    queryKey: ['/api/rbm/campaign', campaignId, 'events'],
+    queryFn: async () => {
+      const res = await fetch(`/api/rbm/campaign/${campaignId}/events`, { credentials: 'include' });
+      if (!res.ok) throw new Error('Failed to fetch RBM events');
+      const data = await res.json();
+      return data.events || [];
+    },
+    enabled: !!campaignId,
+  });
+
   const pauseMutation = useMutation({
     mutationFn: () => apiRequest(`/api/campaigns/${campaignId}/pause`, 'POST'),
     onSuccess: () => {
@@ -239,6 +266,25 @@ export default function CampaignDetail() {
       queryClient.invalidateQueries({ queryKey: ['/api/campaigns'] });
       refetchUniverse();
       toast({ title: t('campaign.rebalanced'), description: t('campaign.rebalancedDesc') });
+    },
+  });
+
+  const liquidateMutation = useMutation({
+    mutationFn: () => apiRequest(`/api/campaigns/${campaignId}/liquidate-positions`, 'POST'),
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/campaigns'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/campaigns', campaignId, 'positions'] });
+      toast({ 
+        title: t('campaign.liquidated') || 'Positions Liquidated',
+        description: data.message || `Liquidated ${data.liquidatedCount} positions for ~$${data.estimatedUSD?.toFixed(2) || '0.00'}`
+      });
+    },
+    onError: (error: any) => {
+      toast({ 
+        title: t('common.error') || 'Error',
+        description: error.message || 'Failed to liquidate positions',
+        variant: 'destructive'
+      });
     },
   });
 
@@ -376,7 +422,7 @@ export default function CampaignDetail() {
   }
 
   const isLive = getPortfolioMode(campaign.portfolio_id) === 'live';
-  const isPending = pauseMutation.isPending || resumeMutation.isPending || stopMutation.isPending || rebalanceMutation.isPending;
+  const isPending = pauseMutation.isPending || resumeMutation.isPending || stopMutation.isPending || rebalanceMutation.isPending || liquidateMutation.isPending;
 
   return (
     <div className="container mx-auto py-6 px-4 space-y-6">
@@ -457,7 +503,7 @@ export default function CampaignDetail() {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-5">
         <Card>
           <CardContent className="pt-4">
             <div className="flex items-center gap-2 text-muted-foreground text-sm mb-1">
@@ -506,6 +552,28 @@ export default function CampaignDetail() {
             </p>
           </CardContent>
         </Card>
+        <Card>
+          <CardContent className="pt-4">
+            <div className="flex items-center gap-2 text-muted-foreground text-sm mb-1">
+              <Zap className={`h-4 w-4 ${campaign.rbm_status === 'ACTIVE' ? 'text-yellow-500' : 'text-muted-foreground'}`} />
+              {t('rbm.title')}
+            </div>
+            <div className="flex items-center gap-2">
+              <p className="text-xl font-bold" data-testid="text-rbm-multiplier">
+                {campaign.rbm_approved ? `${parseFloat(campaign.rbm_approved).toFixed(1)}x` : '1.0x'}
+              </p>
+              {campaign.rbm_status && campaign.rbm_status !== 'INACTIVE' && (
+                <Badge 
+                  variant={campaign.rbm_status === 'ACTIVE' ? 'default' : campaign.rbm_status === 'PENDING' ? 'secondary' : 'destructive'}
+                  className="text-xs"
+                  data-testid="badge-rbm-status"
+                >
+                  {campaign.rbm_status}
+                </Badge>
+              )}
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       <Card>
@@ -527,7 +595,7 @@ export default function CampaignDetail() {
       </Card>
 
       <Tabs defaultValue="activity" className="w-full">
-        <TabsList className="grid w-full grid-cols-4">
+        <TabsList className="grid w-full grid-cols-5">
           <TabsTrigger value="activity" data-testid="tab-activity">
             <Bot className="h-4 w-4 mr-2" />
             {t('campaignDetail.tabs.activity')}
@@ -539,6 +607,10 @@ export default function CampaignDetail() {
           <TabsTrigger value="positions" data-testid="tab-positions">
             <Target className="h-4 w-4 mr-2" />
             {t('campaignDetail.tabs.positions')}
+          </TabsTrigger>
+          <TabsTrigger value="rbm" data-testid="tab-rbm">
+            <Zap className="h-4 w-4 mr-2" />
+            RBM
           </TabsTrigger>
           <TabsTrigger value="reports" data-testid="tab-reports">
             <BarChart3 className="h-4 w-4 mr-2" />
@@ -737,11 +809,29 @@ export default function CampaignDetail() {
             {/* Open Positions */}
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-lg flex items-center gap-2">
-                  <Target className="h-5 w-5 text-delfos-cyan" />
-                  {t('campaignDetail.positions.openPositions')}
-                  <Badge variant="secondary" className="ml-2">{openPositions.length}</Badge>
-                </CardTitle>
+                <div className="flex items-center justify-between gap-4">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Target className="h-5 w-5 text-delfos-cyan" />
+                    {t('campaignDetail.positions.openPositions')}
+                    <Badge variant="secondary" className="ml-2">{openPositions.length}</Badge>
+                  </CardTitle>
+                  {openPositions.length > 0 && (campaign?.status === 'running' || campaign?.status === 'paused' || campaign?.status === 'active') && (
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => {
+                        if (confirm(t('campaignDetail.positions.confirmLiquidate') || 'Are you sure you want to liquidate all open positions? This will sell all assets to generate USD liquidity.')) {
+                          liquidateMutation.mutate();
+                        }
+                      }}
+                      disabled={liquidateMutation.isPending}
+                      data-testid="button-liquidate-positions"
+                    >
+                      <Banknote className="h-4 w-4 mr-2" />
+                      {liquidateMutation.isPending ? (t('common.loading') || 'Loading...') : (t('campaignDetail.positions.liquidate') || 'Liquidate All')}
+                    </Button>
+                  )}
+                </div>
               </CardHeader>
               <CardContent>
                 {positionsLoading ? (
@@ -905,6 +995,94 @@ export default function CampaignDetail() {
               </CardContent>
             </Card>
           </div>
+        </TabsContent>
+
+        <TabsContent value="rbm" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Zap className="h-5 w-5" />
+                {t('rbm.title')} - {t('campaignDetail.tabs.activity')}
+              </CardTitle>
+              <CardDescription>
+                {language === 'pt-BR' ? 'Histórico de eventos do multiplicador de risco' : 
+                 language === 'es' ? 'Historial de eventos del multiplicador de riesgo' : 
+                 'Risk multiplier event history and audit trail'}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {rbmEventsLoading ? (
+                <div className="space-y-2">
+                  <Skeleton className="h-10 w-full" />
+                  <Skeleton className="h-10 w-full" />
+                  <Skeleton className="h-10 w-full" />
+                </div>
+              ) : rbmEvents && rbmEvents.length > 0 ? (
+                <div className="rounded-md border overflow-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="whitespace-nowrap">
+                          {language === 'pt-BR' ? 'Tipo de Evento' : language === 'es' ? 'Tipo de Evento' : 'Event Type'}
+                        </TableHead>
+                        <TableHead className="text-right">
+                          {language === 'pt-BR' ? 'Anterior' : language === 'es' ? 'Anterior' : 'Previous'}
+                        </TableHead>
+                        <TableHead className="text-right">
+                          {language === 'pt-BR' ? 'Novo' : language === 'es' ? 'Nuevo' : 'New'}
+                        </TableHead>
+                        <TableHead>
+                          {language === 'pt-BR' ? 'Fonte' : language === 'es' ? 'Origen' : 'Source'}
+                        </TableHead>
+                        <TableHead>
+                          {language === 'pt-BR' ? 'Data' : language === 'es' ? 'Fecha' : 'Date'}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {rbmEvents.map((event) => {
+                        const getEventBadge = (type: string) => {
+                          switch(type) {
+                            case 'ACTIVATION': return <Badge variant="default">Activation</Badge>;
+                            case 'REDUCTION': return <Badge className="bg-yellow-500">Reduction</Badge>;
+                            case 'ROLLBACK': return <Badge variant="destructive">Rollback</Badge>;
+                            case 'DEACTIVATION': return <Badge variant="secondary">Deactivation</Badge>;
+                            default: return <Badge variant="outline">{type}</Badge>;
+                          }
+                        };
+                        return (
+                          <TableRow key={event.id} data-testid={`rbm-event-row-${event.id}`}>
+                            <TableCell>{getEventBadge(event.event_type)}</TableCell>
+                            <TableCell className="text-right font-mono">
+                              {event.previous_value ? `${parseFloat(event.previous_value).toFixed(1)}x` : '-'}
+                            </TableCell>
+                            <TableCell className="text-right font-mono font-semibold">
+                              {event.new_value ? `${parseFloat(event.new_value).toFixed(1)}x` : '-'}
+                            </TableCell>
+                            <TableCell className="text-muted-foreground text-sm">
+                              {event.trigger_source || '-'}
+                            </TableCell>
+                            <TableCell className="text-muted-foreground text-sm whitespace-nowrap">
+                              {new Date(event.created_at).toLocaleString()}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <Zap className="h-10 w-10 mx-auto text-muted-foreground mb-3" />
+                  <p className="text-muted-foreground">
+                    {language === 'pt-BR' ? 'Nenhum evento RBM registrado' : 
+                     language === 'es' ? 'No hay eventos RBM registrados' : 
+                     'No RBM events recorded'}
+                  </p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="reports">
