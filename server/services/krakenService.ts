@@ -1,8 +1,19 @@
 import crypto from "crypto";
 import { storage } from "../storage";
+import { externalServiceToggleService } from './externalServiceToggleService';
 
 // Kraken REST API base URL
 const KRAKEN_API_URL = "https://api.kraken.com";
+
+// Check if Kraken REST service is enabled (with graceful fallback)
+async function isKrakenRestEnabled(): Promise<boolean> {
+  try {
+    return await externalServiceToggleService.isServiceEnabled('kraken_rest');
+  } catch (error) {
+    console.warn('[KrakenREST] Toggle service not available, defaulting to enabled');
+    return true;
+  }
+}
 
 // Kraken WebSocket URL
 export const KRAKEN_WS_URL = "wss://ws.kraken.com";
@@ -28,6 +39,13 @@ function getKrakenSignature(path: string, data: Record<string, any>, secret: str
 
 // Fetch ticker data from Kraken REST API
 export async function fetchKrakenTicker(pairs: string[]): Promise<KrakenTickerData[]> {
+  // Check if service is enabled
+  const enabled = await isKrakenRestEnabled();
+  if (!enabled) {
+    console.log('[KrakenREST] Service is disabled by admin toggle');
+    return [];
+  }
+
   try {
     const pairParam = pairs.join(',');
     const response = await fetch(`${KRAKEN_API_URL}/0/public/Ticker?pair=${pairParam}`);
