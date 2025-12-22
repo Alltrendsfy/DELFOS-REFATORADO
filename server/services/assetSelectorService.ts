@@ -81,15 +81,20 @@ class AssetSelectorService {
 
     console.log(`[AssetSelector] Found ${allSymbols.length} Kraken symbols in database`);
 
+    // Track missing data for diagnostics
+    let missingL1 = 0, missingL2 = 0, missingTicks = 0, insufficientTicks = 0;
+    
     const metricsPromises = allSymbols.map(async (sym: typeof symbols.$inferSelect) => {
       try {
-        const l1 = await dataIngestionService.getL1Quote("kraken", sym.exchange_symbol);
-        const l2 = await dataIngestionService.getL2OrderBook("kraken", sym.exchange_symbol);
-        const ticks = await dataIngestionService.getRecentTicks("kraken", sym.exchange_symbol, 500);
+        // L1 quotes are stored with symbol format (e.g., "ETH/USD"), not exchange_symbol ("ETHUSD")
+        const l1 = await dataIngestionService.getL1Quote("kraken", sym.symbol);
+        const l2 = await dataIngestionService.getL2OrderBook("kraken", sym.symbol);
+        const ticks = await dataIngestionService.getRecentTicks("kraken", sym.symbol, 500);
 
-        if (!l1 || !l2 || !ticks || ticks.length < 10) {
-          return null;
-        }
+        if (!l1) { missingL1++; return null; }
+        if (!l2) { missingL2++; return null; }
+        if (!ticks) { missingTicks++; return null; }
+        if (ticks.length < 10) { insufficientTicks++; return null; }
 
         const prices = ticks.map((t: any) => parseFloat(t.price));
         const timestamps = ticks.map((t: any) => t.exchange_ts || t.ingest_ts);
@@ -146,6 +151,7 @@ class AssetSelectorService {
     const validMetrics = results.filter((m: AssetMetrics | null): m is AssetMetrics => m !== null);
     
     console.log(`[AssetSelector] Calculated extended metrics for ${validMetrics.length}/${allSymbols.length} symbols`);
+    console.log(`[AssetSelector] Missing data breakdown: L1=${missingL1}, L2=${missingL2}, NoTicks=${missingTicks}, InsufficientTicks=${insufficientTicks}`);
     
     return validMetrics;
   }
@@ -288,13 +294,38 @@ class AssetSelectorService {
 
     console.log(`[AssetSelector] Applying filters for user ${userId}:`, filter);
 
+    // Diagnostic: show sample metrics before filtering
+    if (metrics.length > 0) {
+      const sample = metrics.slice(0, 5);
+      console.log(`[AssetSelector] Sample metrics (first 5):`);
+      sample.forEach(m => {
+        console.log(`  ${m.symbol}: vol=${m.volume_24h_usd.toFixed(0)} spread=${(m.spread_mid_pct*100).toFixed(4)}% depth=${m.depth_top10_usd.toFixed(0)} atr=${(m.atr_daily_pct*100).toFixed(2)}%`);
+      });
+    }
+
+    const minVol = parseFloat(filter.min_volume_24h_usd || "0");
+    const maxSpread = parseFloat(filter.max_spread_mid_pct || "1");
+    const minDepth = parseFloat(filter.min_depth_top10_usd || "0");
+    const minAtr = parseFloat(filter.min_atr_daily_pct || "0");
+    const maxAtr = parseFloat(filter.max_atr_daily_pct || "1");
+
     const filtered = metrics.filter(m => 
-      m.volume_24h_usd >= parseFloat(filter.min_volume_24h_usd || "0") &&
-      m.spread_mid_pct <= parseFloat(filter.max_spread_mid_pct || "1") &&
-      m.depth_top10_usd >= parseFloat(filter.min_depth_top10_usd || "0") &&
-      m.atr_daily_pct >= parseFloat(filter.min_atr_daily_pct || "0") &&
-      m.atr_daily_pct <= parseFloat(filter.max_atr_daily_pct || "1")
+      m.volume_24h_usd >= minVol &&
+      m.spread_mid_pct <= maxSpread &&
+      m.depth_top10_usd >= minDepth &&
+      m.atr_daily_pct >= minAtr &&
+      m.atr_daily_pct <= maxAtr
     );
+
+    // Diagnostic: show filter failure reasons
+    if (filtered.length === 0 && metrics.length > 0) {
+      const failVol = metrics.filter(m => m.volume_24h_usd < minVol).length;
+      const failSpread = metrics.filter(m => m.spread_mid_pct > maxSpread).length;
+      const failDepth = metrics.filter(m => m.depth_top10_usd < minDepth).length;
+      const failAtrLow = metrics.filter(m => m.atr_daily_pct < minAtr).length;
+      const failAtrHigh = metrics.filter(m => m.atr_daily_pct > maxAtr).length;
+      console.log(`[AssetSelector] Filter failures: vol<${minVol}=${failVol}, spread>${maxSpread}=${failSpread}, depth<${minDepth}=${failDepth}, atr<${minAtr}=${failAtrLow}, atr>${maxAtr}=${failAtrHigh}`);
+    }
 
     console.log(`[AssetSelector] Filtered to ${filtered.length} assets (target: ${filter.target_assets_count})`);
 
@@ -532,11 +563,49 @@ class AssetSelectorService {
     console.log(`[AssetSelector] Selection complete. Run ID: ${run_id}, Assets: ${clusteredAssets.length}, Clusters: ${clusters.length}`);
     console.log(`[AssetSelector] Cluster labels:`, clusters.map(c => `${c.cluster_number}: ${c.label} (${c.assets.length} assets)`));
 
+    // Persist rankings with cluster_number to database
+    await this.persistRankings(run_id, clusteredAssets);
+    console.log(`[AssetSelector] Persisted ${clusteredAssets.length} rankings to database`);
+
     return {
       run_id,
       assets: clusteredAssets,
       clusters,
     };
+  }
+
+  private async persistRankings(runId: string, assets: ClusteredAsset[]): Promise<void> {
+    // Get symbol IDs from database
+    const symbolIds = await db.select({
+      id: symbols.id,
+      symbol: symbols.symbol,
+    }).from(symbols).execute();
+    
+    const symbolIdMap = new Map(symbolIds.map(s => [s.symbol, s.id]));
+    
+    // Build values array for bulk insert
+    const valuesToInsert = assets
+      .filter(asset => symbolIdMap.has(asset.symbol))
+      .map(asset => ({
+        run_id: runId,
+        symbol_id: symbolIdMap.get(asset.symbol)!,
+        rank: asset.rank,
+        score: asset.score.toFixed(4), // decimal expects string
+        cluster_number: asset.cluster_number,
+      }));
+    
+    if (valuesToInsert.length === 0) {
+      console.warn(`[AssetSelector] No valid assets to persist`);
+      return;
+    }
+    
+    // Use transaction for consistency - bulk insert all rankings
+    await db.transaction(async (tx) => {
+      // Bulk insert all rankings at once
+      await tx.insert(symbol_rankings).values(valuesToInsert);
+    });
+    
+    console.log(`[AssetSelector] Persisted ${valuesToInsert.length} rankings with clusters`);
   }
 
   async getUserFilters(userId: string) {
