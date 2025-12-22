@@ -25,7 +25,8 @@ import {
   Zap,
   AlertCircle,
   Trash2,
-  PlusCircle
+  PlusCircle,
+  ArrowLeft
 } from "lucide-react";
 import {
   AlertDialog,
@@ -900,9 +901,17 @@ export default function Campaigns() {
           </Card>
         )}
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div>
-            <h1 className="text-3xl font-bold" data-testid="campaigns-title">{t('campaign.title')}</h1>
-            <p className="text-muted-foreground">{t('campaign.subtitle')}</p>
+          <div className="flex items-center gap-4">
+            <Link href="/" data-testid="link-back-to-dashboard">
+              <Button variant="ghost" size="sm" className="gap-2">
+                <ArrowLeft className="h-4 w-4" />
+                {t('common.backToDashboard')}
+              </Button>
+            </Link>
+            <div>
+              <h1 className="text-3xl font-bold" data-testid="campaigns-title">{t('campaign.title')}</h1>
+              <p className="text-muted-foreground">{t('campaign.subtitle')}</p>
+            </div>
           </div>
         <div className="flex items-center gap-2">
           <Badge variant="outline" className="text-sm" data-testid="campaigns-total-count">
