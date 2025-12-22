@@ -16,6 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { DelfosLogo } from "@/components/DelfosLogo";
+import { LoginAlertListener } from "@/components/LoginAlertListener";
 import Landing from "@/pages/Landing";
 import BetaActivation from "@/pages/BetaActivation";
 import Dashboard from "@/pages/Dashboard";
@@ -40,6 +41,41 @@ import Admin from "@/pages/Admin";
 import Campaigns from "@/pages/Campaigns";
 import CampaignWizard from "@/pages/CampaignWizard";
 import CampaignDetail from "@/pages/CampaignDetail";
+import FranchiseAdmin from "@/pages/FranchiseAdmin";
+import FranchiseDetail from "@/pages/FranchiseDetail";
+import FranchiseDashboard from "@/pages/FranchiseDashboard";
+import FranchiseReports from "@/pages/FranchiseReports";
+import FranchiseeRoyalties from "@/pages/FranchiseeRoyalties";
+import FranchiseRoyalties from "@/pages/FranchiseRoyalties";
+import FranchiseAnalytics from "@/pages/FranchiseAnalytics";
+import FraudAlerts from "@/pages/FraudAlerts";
+import OpportunityBlueprints from "@/pages/OpportunityBlueprints";
+import OpportunityRadar from "@/pages/OpportunityRadar";
+import FranchisePlans from "@/pages/FranchisePlans";
+import FranchisorFinancial from "@/pages/FranchisorFinancial";
+import FranchiseOnboarding from "@/pages/FranchiseOnboarding";
+import MasterFranchiseDashboard from "@/pages/MasterFranchiseDashboard";
+import MasterAccounts from "@/pages/MasterAccounts";
+import MasterAntifraudDashboard from "@/pages/MasterAntifraudDashboard";
+import MasterTerritories from "@/pages/MasterTerritories";
+import VREDashboard from "@/pages/VREDashboard";
+import FeatureStoreDashboard from "@/pages/FeatureStoreDashboard";
+import OpportunityWindows from "@/pages/OpportunityWindows";
+import Baskets10x10 from "@/pages/Baskets10x10";
+import AILearning from "@/pages/AILearning";
+import FranchisorDashboard from "@/pages/FranchisorDashboard";
+import FranchisorSettings from "@/pages/FranchisorSettings";
+import FranchisorExternalServices from "@/pages/FranchisorExternalServices";
+import ContractTemplates from "@/pages/ContractTemplates";
+import TerritoriesPage from "@/pages/TerritoriesPage";
+import MasterFranchisesPage from "@/pages/MasterFranchisesPage";
+import FranchiseLanding from "@/pages/FranchiseLanding";
+import { FranchisorLogin, MasterFranchiseLogin, FranchiseLogin } from "@/pages/PersonaLogin";
+import AccountActivation from "@/pages/AccountActivation";
+import FranchisorLeadManagement from "@/pages/FranchisorLeadManagement";
+import FranchisorSetup from "@/pages/FranchisorSetup";
+import MasterFranchiseLanding from "@/pages/MasterFranchiseLanding";
+import FranchisorRBMDashboard from "@/pages/FranchisorRBMDashboard";
 import NotFound from "@/pages/not-found";
 
 function ThemeToggle() {
@@ -103,6 +139,7 @@ function AuthenticatedApp() {
 
   return (
     <SidebarProvider style={style as React.CSSProperties}>
+      <LoginAlertListener />
       <div className="flex h-screen w-full">
         <AppSidebar />
         <div className="flex flex-col flex-1">
@@ -125,7 +162,15 @@ function AuthenticatedApp() {
               <Route path="/trading" component={Trading} />
               <Route path="/positions" component={Positions} />
               <Route path="/signals" component={Signals} />
+              <Route path="/opportunities" component={OpportunityBlueprints} />
+              <Route path="/opportunity-radar" component={OpportunityRadar} />
+              <Route path="/opportunity-windows" component={OpportunityWindows} />
+              <Route path="/baskets" component={Baskets10x10} />
+              <Route path="/ai-learning" component={AILearning} />
+              <Route path="/franchise-plans" component={FranchisePlans} />
               <Route path="/risk" component={RiskManagement} />
+              <Route path="/vre" component={VREDashboard} />
+              <Route path="/feature-store" component={FeatureStoreDashboard} />
               <Route path="/circuit-breakers" component={CircuitBreakers} />
               <Route path="/news" component={News} />
               <Route path="/assets" component={AssetSelection} />
@@ -140,6 +185,29 @@ function AuthenticatedApp() {
               <Route path="/campaigns/:id" component={CampaignDetail} />
               <Route path="/settings" component={Settings} />
               <Route path="/admin" component={Admin} />
+              <Route path="/admin/fraud-alerts" component={FraudAlerts} />
+              <Route path="/franchise-admin" component={FranchiseAdmin} />
+              <Route path="/franchise-admin/royalties" component={FranchiseRoyalties} />
+              <Route path="/franchise-admin/analytics" component={FranchiseAnalytics} />
+              <Route path="/franchise-admin/financial" component={FranchisorFinancial} />
+              <Route path="/franchisor-financial" component={FranchisorFinancial} />
+              <Route path="/franchisor" component={FranchisorDashboard} />
+              <Route path="/franchisor/leads" component={FranchisorLeadManagement} />
+              <Route path="/franchisor-settings" component={FranchisorSettings} />
+              <Route path="/franchisor/external-services" component={FranchisorExternalServices} />
+              <Route path="/franchisor/rbm" component={FranchisorRBMDashboard} />
+              <Route path="/territories" component={TerritoriesPage} />
+              <Route path="/master-franchises" component={MasterFranchisesPage} />
+              <Route path="/contract-templates" component={ContractTemplates} />
+              <Route path="/franchise-admin/:id" component={FranchiseDetail} />
+              <Route path="/franchise" component={FranchiseDashboard} />
+              <Route path="/franchise/royalties" component={FranchiseeRoyalties} />
+              <Route path="/franchise/reports" component={FranchiseReports} />
+              <Route path="/franchise/onboarding" component={FranchiseOnboarding} />
+              <Route path="/master-franchise" component={MasterFranchiseDashboard} />
+              <Route path="/master-franchise/accounts" component={MasterAccounts} />
+              <Route path="/master-franchise/antifraud" component={MasterAntifraudDashboard} />
+              <Route path="/master-franchise/territories" component={MasterTerritories} />
               <Route component={NotFound} />
             </Switch>
           </main>
@@ -174,15 +242,28 @@ function Router() {
     );
   }
 
-  if (!isAuthenticated) {
-    return <Landing />;
-  }
-
-  if (!betaStatus?.isBetaApproved) {
-    return <BetaActivation />;
-  }
-
-  return <AuthenticatedApp />;
+  return (
+    <Switch>
+      <Route path="/franchise-registration" component={FranchiseLanding} />
+      <Route path="/master-registration" component={MasterFranchiseLanding} />
+      <Route path="/franchisor-setup" component={FranchisorSetup} />
+      <Route path="/login/franchisor" component={FranchisorLogin} />
+      <Route path="/login/master" component={MasterFranchiseLogin} />
+      <Route path="/login/franchise" component={FranchiseLogin} />
+      <Route path="/activate/:token" component={AccountActivation} />
+      <Route>
+        {() => {
+          if (!isAuthenticated) {
+            return <Landing />;
+          }
+          if (!betaStatus?.isBetaApproved) {
+            return <BetaActivation />;
+          }
+          return <AuthenticatedApp />;
+        }}
+      </Route>
+    </Switch>
+  );
 }
 
 function App() {
