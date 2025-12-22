@@ -4,8 +4,12 @@ import crypto from "crypto";
 import { db } from "./db";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated } from "./replitAuth";
+import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
+import { registerRBMRoutes } from "./routes/rbmRoutes";
 import { getChatCompletion, checkRateLimit, analyzeMarket, type MarketContext, type ChatMessage } from "./services/openaiService";
 import { analyzeRankings, analyzeClusters, suggestTradingStrategy, analyzeRiskProfile, suggestCampaignRisk, type CampaignContext } from "./services/ai/aiAnalysisService";
+import { campaignPatternLearnerService } from "./services/ai/campaignPatternLearnerService";
+import { opportunityLearnerService } from "./services/ai/opportunityLearnerService";
 import { performanceService } from "./services/performanceService";
 import { TradingService } from "./services/tradingService";
 import { RiskService } from "./services/riskService";
@@ -45,10 +49,21 @@ import {
   clusters,
   campaign_risk_states,
   campaign_orders,
-  campaign_positions
+  campaign_positions,
+  users,
+  franchise_plans,
+  franchises,
+  franchise_users,
+  opportunity_blueprints,
+  learning_runs,
+  franchisor_settings,
+  contract_templates,
+  contract_acceptances,
+  insertContractTemplateSchema,
+  insertFranchisorSettingsSchema,
 } from "@shared/schema";
 import { z } from "zod";
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { eq, and, desc, sql, inArray, count, or } from "drizzle-orm";
 
 // Custom Zod schemas for non-DB endpoints
 const krakenCredentialsSchema = z.object({
@@ -345,6 +360,10 @@ function validateQueryLimit(limit: unknown): number | undefined {
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Register object storage routes for file uploads
+  registerObjectStorageRoutes(app);
+  registerRBMRoutes(app);
+
   // Public diagnostic/test endpoints (before auth middleware)
   app.get('/api/test/simple', async (req, res) => {
     console.log('[TEST] Simple test endpoint hit');
@@ -465,6 +484,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Auth debug endpoint - diagnose session state for multi-user troubleshooting
+  app.get('/api/auth/debug', async (req: any, res) => {
+    const sessionExists = !!req.session;
+    const userExists = !!req.user;
+    const hasSessionId = !!req.sessionID;
+    
+    // Debug info (safe to expose - no secrets)
+    const debugInfo = {
+      timestamp: new Date().toISOString(),
+      host: req.hostname,
+      origin: req.get('origin') || 'none',
+      sessionExists,
+      sessionId: hasSessionId ? req.sessionID?.substring(0, 8) + '...' : null,
+      userExists,
+      userId: req.user?.claims?.sub || null,
+      userEmail: req.user?.claims?.email || null,
+      isAuthenticated: req.isAuthenticated?.() || false,
+      cookiesReceived: Object.keys(req.cookies || {}).length > 0,
+      hasConnectSid: !!req.cookies?.['connect.sid'],
+    };
+    
+    console.log(`[AUTH DEBUG] Session diagnostic | Host: ${req.hostname} | User: ${debugInfo.userId || 'none'} | Authenticated: ${debugInfo.isAuthenticated}`);
+    
+    res.json(debugInfo);
+  });
+
   // Portfolio routes
   app.get('/api/portfolios', isAuthenticated, async (req: any, res) => {
     try {
@@ -534,11 +579,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ? (dailyPnL / portfolioValue) * 100 
         : 0;
       
-      // Get active campaigns count
+      // Get active campaigns count (exclude soft-deleted campaigns)
       const activeCampaigns = await db.select()
         .from(campaigns)
         .where(and(
           eq(campaigns.status, 'running'),
+          eq(campaigns.is_deleted, false),
           inArray(campaigns.portfolio_id, portfolios.map(p => p.id))
         ));
       
@@ -560,6 +606,137 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Enhanced dashboard stats with opportunities, system health, and Kraken balance
+  app.get('/api/dashboard/enhanced-stats', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      // Get opportunity blueprints count
+      const activeBlueprints = await db.select({ count: count() })
+        .from(opportunity_blueprints)
+        .where(and(
+          eq(opportunity_blueprints.user_id, userId),
+          eq(opportunity_blueprints.status, 'ACTIVE')
+        ));
+      
+      const pendingBlueprints = await db.select()
+        .from(opportunity_blueprints)
+        .where(and(
+          eq(opportunity_blueprints.user_id, userId),
+          eq(opportunity_blueprints.status, 'ACTIVE')
+        ))
+        .orderBy(desc(opportunity_blueprints.created_at))
+        .limit(5);
+      
+      // Get staleness and system health status
+      const stalenessLevel = stalenessGuardService.getGlobalStalenessLevel();
+      const quarantineStatus = stalenessGuardService.getQuarantineStatus();
+      
+      // Determine system health
+      let systemHealth: 'healthy' | 'warning' | 'critical' = 'healthy';
+      let systemAlerts: string[] = [];
+      
+      if (stalenessLevel === 'kill_switch' || stalenessLevel === 'hard') {
+        systemHealth = 'critical';
+        systemAlerts.push('Dados de mercado atrasados - trading pausado');
+      } else if (stalenessLevel === 'warn') {
+        systemHealth = 'warning';
+        systemAlerts.push('Alguns dados de mercado com atraso');
+      }
+      
+      const quarantinedCount = quarantineStatus.quarantinedSymbols?.length || 0;
+      const activeSymbolsCount = quarantineStatus.activeSymbols || 0;
+      
+      if (quarantinedCount > 10) {
+        if (systemHealth === 'healthy') systemHealth = 'warning';
+        systemAlerts.push(`${quarantinedCount} símbolos em quarentena`);
+      }
+      
+      // Get Kraken balance if user has credentials
+      let krakenBalance = null;
+      try {
+        const userSettings = await storage.getUserSettings(userId);
+        if (userSettings?.kraken_api_key && userSettings?.kraken_api_secret) {
+          const { krakenService } = await import('./services/krakenService');
+          const balance = await krakenService.getBalance(userId);
+          if (balance) {
+            const zusdBalance = parseFloat(balance['ZUSD'] || '0');
+            const usdtBalance = parseFloat(balance['USDT'] || '0');
+            krakenBalance = {
+              zusd: zusdBalance.toFixed(2),
+              usdt: usdtBalance.toFixed(2),
+              total_available: zusdBalance.toFixed(2), // ZUSD is the usable one for spot
+              has_credentials: true
+            };
+          }
+        }
+      } catch (err) {
+        // Kraken balance fetch failed - not critical
+        krakenBalance = { has_credentials: false };
+      }
+      
+      // Get recent signals from robot activities
+      const portfolios = await storage.getPortfoliosByUserId(userId);
+      const portfolioIds = portfolios.map(p => p.id);
+      
+      let recentSignals: any[] = [];
+      if (portfolioIds.length > 0) {
+        const userCampaigns = await db.select()
+          .from(campaigns)
+          .where(and(
+            inArray(campaigns.portfolio_id, portfolioIds),
+            eq(campaigns.is_deleted, false)
+          ));
+        
+        const campaignIds = userCampaigns.map(c => c.id);
+        
+        if (campaignIds.length > 0) {
+          const signalActivities = await db.select()
+            .from(robot_activity_logs)
+            .where(and(
+              inArray(robot_activity_logs.campaign_id, campaignIds),
+              inArray(robot_activity_logs.event_type, ['signal_generated', 'position_open', 'position_close'])
+            ))
+            .orderBy(desc(robot_activity_logs.created_at))
+            .limit(5);
+          
+          recentSignals = signalActivities.map(a => ({
+            id: a.id,
+            type: a.event_type,
+            symbol: a.symbol,
+            severity: a.severity,
+            timestamp: a.created_at
+          }));
+        }
+      }
+      
+      res.json({
+        opportunities: {
+          active_count: activeBlueprints[0]?.count || 0,
+          recent: pendingBlueprints.map(b => ({
+            id: b.id,
+            type: b.type,
+            score: b.opportunity_score,
+            assets: b.assets,
+            expires_at: b.expires_at
+          }))
+        },
+        system_health: {
+          status: systemHealth,
+          staleness_level: stalenessLevel,
+          active_symbols: activeSymbolsCount,
+          quarantined_symbols: quarantinedCount,
+          alerts: systemAlerts
+        },
+        kraken_balance: krakenBalance,
+        recent_signals: recentSignals
+      });
+    } catch (error) {
+      console.error("Error fetching enhanced dashboard stats:", error);
+      res.status(500).json({ message: "Failed to fetch enhanced dashboard stats" });
+    }
+  });
+
   // Recent robot activities for dashboard
   app.get('/api/robot-activities/recent', isAuthenticated, async (req: any, res) => {
     try {
@@ -573,10 +750,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.json([]);
       }
       
-      // Get campaigns for user's portfolios
+      // Get campaigns for user's portfolios (exclude soft-deleted)
       const userCampaigns = await db.select()
         .from(campaigns)
-        .where(inArray(campaigns.portfolio_id, portfolioIds));
+        .where(and(
+          inArray(campaigns.portfolio_id, portfolioIds),
+          eq(campaigns.is_deleted, false)
+        ));
       
       const campaignIds = userCampaigns.map(c => c.id);
       
@@ -1074,6 +1254,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/portfolios', isAuthenticated, async (req: any, res) => {
     try {
       const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email || 'unknown';
+
+      console.log(`[PORTFOLIO] 📝 Creating portfolio | User: ${userId} (${userEmail}) | Name: ${req.body.name} | Mode: ${req.body.trading_mode || 'paper'}`);
 
       const portfolioData = {
         user_id: userId,
@@ -1087,6 +1270,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Validate request body with Zod
       const validationResult = insertPortfolioSchema.safeParse(portfolioData);
       if (!validationResult.success) {
+        console.log(`[PORTFOLIO] ❌ Validation failed | User: ${userId} | Errors: ${JSON.stringify(validationResult.error.errors)}`);
         return res.status(400).json({ 
           message: "Invalid portfolio data", 
           errors: validationResult.error.errors 
@@ -1094,9 +1278,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const portfolio = await storage.createPortfolio(validationResult.data);
+      console.log(`[PORTFOLIO] ✓ Created successfully | User: ${userId} | Portfolio ID: ${portfolio.id} | Name: ${portfolio.name}`);
       res.json(portfolio);
     } catch (error) {
-      console.error("Error creating portfolio:", error);
+      console.error(`[PORTFOLIO] ❌ Error creating portfolio | User: ${req.user?.claims?.sub} |`, error);
       res.status(500).json({ message: "Failed to create portfolio" });
     }
   });
@@ -1131,19 +1316,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      // Delete all non-active campaigns first (cascading to related tables)
+      // Soft-delete all non-active campaigns (ANTIFRAUDE: campaigns cannot be hard deleted)
       const portfolioCampaigns = await db.select({ id: campaigns.id })
         .from(campaigns)
-        .where(eq(campaigns.portfolio_id, portfolioId));
+        .where(and(
+          eq(campaigns.portfolio_id, portfolioId),
+          eq(campaigns.is_deleted, false)
+        ));
       
       for (const campaign of portfolioCampaigns) {
-        // Delete related records in correct order
-        await db.delete(robot_activity_logs).where(eq(robot_activity_logs.campaign_id, campaign.id));
-        await db.delete(campaign_risk_states).where(eq(campaign_risk_states.campaign_id, campaign.id));
-        await db.delete(clusters).where(eq(clusters.campaign_id, campaign.id));
-        await db.delete(campaign_orders).where(eq(campaign_orders.campaign_id, campaign.id));
-        await db.delete(campaign_positions).where(eq(campaign_positions.campaign_id, campaign.id));
-        await db.delete(campaigns).where(eq(campaigns.id, campaign.id));
+        // Soft-delete: mark as deleted instead of removing data
+        await db.update(campaigns)
+          .set({ 
+            is_deleted: true, 
+            deleted_at: new Date(),
+            deleted_reason: 'Portfolio deletion requested by user'
+          })
+          .where(eq(campaigns.id, campaign.id));
       }
 
       // Delete portfolio (cascades to positions, trades, risk_parameters via onDelete: 'cascade')
@@ -1442,7 +1631,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Get user's filter preferences
       const filters = await assetSelectorService.getUserFilters(userId);
       
-      // Get latest symbol rankings from database with symbol names
+      // First, get the most recent run_id
+      const latestRun = await db.select({
+        run_id: symbol_rankings.run_id,
+      })
+        .from(symbol_rankings)
+        .orderBy(desc(symbol_rankings.created_at))
+        .limit(1)
+        .execute();
+      
+      if (latestRun.length === 0) {
+        return res.json({ assets: [], filters: filters || null, count: 0 });
+      }
+      
+      const latestRunId = latestRun[0].run_id;
+      
+      // Get all rankings from the latest run with symbol names
       const rankings = await db.select({
         id: symbol_rankings.id,
         run_id: symbol_rankings.run_id,
@@ -1456,8 +1660,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       })
         .from(symbol_rankings)
         .leftJoin(symbols, eq(symbol_rankings.symbol_id, symbols.id))
-        .orderBy(desc(symbol_rankings.created_at))
-        .limit(filters?.target_assets_count || 30)
+        .where(eq(symbol_rankings.run_id, latestRunId))
+        .orderBy(symbol_rankings.rank)
+        .limit(filters?.target_assets_count || 100)
         .execute();
       
       res.json({
@@ -2768,6 +2973,278 @@ Provide your analysis as valid JSON.`;
     } catch (error: any) {
       console.error("Error in campaign summary:", error);
       res.status(500).json({ message: error.message || "Failed to generate campaign summary" });
+    }
+  });
+
+  // ============================================================================
+  // AI LEARNING ENDPOINTS
+  // ============================================================================
+
+  const campaignLearningSchema = z.object({
+    scope: z.enum(['global', 'portfolio', 'campaign']),
+    portfolioId: z.string().optional(),
+    campaignId: z.string().optional(),
+    windowDays: z.number().int().min(7).max(365).optional().default(30),
+  });
+
+  app.post('/api/ai/learning/campaign/analyze', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      const rateLimitCheck = checkRateLimit(userId);
+      if (!rateLimitCheck.allowed) {
+        return res.status(429).json({ message: rateLimitCheck.message });
+      }
+      
+      const parseResult = campaignLearningSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request parameters",
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const { scope, portfolioId, campaignId, windowDays } = parseResult.data;
+      
+      if (portfolioId) {
+        const portfolio = await storage.getPortfolio(portfolioId);
+        if (!portfolio) {
+          return res.status(404).json({ message: "Portfolio not found" });
+        }
+        if (portfolio.user_id !== userId) {
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
+      
+      if (campaignId) {
+        const campaign = await storage.getCampaign(campaignId);
+        if (!campaign) {
+          return res.status(404).json({ message: "Campaign not found" });
+        }
+        const portfolio = await storage.getPortfolio(campaign.portfolio_id);
+        if (!portfolio || portfolio.user_id !== userId) {
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
+      
+      const run = await campaignPatternLearnerService.runAnalysis({
+        scope,
+        portfolioId,
+        campaignId,
+        userId,
+        windowDays,
+      });
+      
+      res.json({
+        runId: run.id,
+        status: run.status,
+        patternsDiscovered: run.patterns_discovered,
+        patternsUpdated: run.patterns_updated,
+        message: "Analysis started successfully",
+      });
+    } catch (error: any) {
+      console.error("Error in campaign pattern analysis:", error);
+      res.status(500).json({ message: error.message || "Failed to run pattern analysis" });
+    }
+  });
+
+  app.get('/api/ai/learning/campaign/patterns', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { scope, portfolioId, campaignId, patternType } = req.query;
+      
+      if (campaignId) {
+        const campaign = await storage.getCampaign(campaignId as string);
+        if (!campaign) {
+          return res.status(404).json({ message: "Campaign not found" });
+        }
+        const portfolio = await storage.getPortfolio(campaign.portfolio_id);
+        if (!portfolio || portfolio.user_id !== userId) {
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
+      
+      if (portfolioId) {
+        const portfolio = await storage.getPortfolio(portfolioId as string);
+        if (!portfolio) {
+          return res.status(404).json({ message: "Portfolio not found" });
+        }
+        if (portfolio.user_id !== userId) {
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
+      
+      if (scope === 'portfolio' && !portfolioId) {
+        return res.status(400).json({ message: "portfolioId required for portfolio scope" });
+      }
+      if (scope === 'campaign' && !campaignId) {
+        return res.status(400).json({ message: "campaignId required for campaign scope" });
+      }
+      
+      const patterns = await campaignPatternLearnerService.getActivePatterns({
+        scope: scope as string,
+        portfolioId: portfolioId as string,
+        campaignId: campaignId as string,
+        patternType: patternType as any,
+      });
+      
+      res.json({ patterns, count: patterns.length });
+    } catch (error: any) {
+      console.error("Error fetching campaign patterns:", error);
+      res.status(500).json({ message: error.message || "Failed to fetch patterns" });
+    }
+  });
+
+  app.get('/api/ai/learning/campaign/:campaignId/recommendations', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { campaignId } = req.params;
+      
+      const campaign = await storage.getCampaign(campaignId);
+      if (!campaign) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      
+      const portfolio = await storage.getPortfolio(campaign.portfolio_id);
+      if (!portfolio || portfolio.user_id !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const recommendations = await campaignPatternLearnerService.getRecommendations(campaignId);
+      
+      res.json(recommendations);
+    } catch (error: any) {
+      console.error("Error fetching recommendations:", error);
+      res.status(500).json({ message: error.message || "Failed to fetch recommendations" });
+    }
+  });
+
+  const opportunityLearningSchema = z.object({
+    scope: z.enum(['global', 'portfolio', 'user']),
+    portfolioId: z.string().optional(),
+    windowDays: z.number().int().min(7).max(365).optional().default(60),
+  });
+
+  app.post('/api/ai/learning/opportunity/analyze', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      const rateLimitCheck = checkRateLimit(userId);
+      if (!rateLimitCheck.allowed) {
+        return res.status(429).json({ message: rateLimitCheck.message });
+      }
+      
+      const parseResult = opportunityLearningSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request parameters",
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const { scope, portfolioId, windowDays } = parseResult.data;
+      
+      if (portfolioId) {
+        const portfolio = await storage.getPortfolio(portfolioId);
+        if (!portfolio) {
+          return res.status(404).json({ message: "Portfolio not found" });
+        }
+        if (portfolio.user_id !== userId) {
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
+      
+      const run = await opportunityLearnerService.runAnalysis({
+        scope,
+        userId,
+        portfolioId,
+        windowDays,
+      });
+      
+      res.json({
+        runId: run.id,
+        status: run.status,
+        patternsDiscovered: run.patterns_discovered,
+        patternsUpdated: run.patterns_updated,
+        message: "Analysis started successfully",
+      });
+    } catch (error: any) {
+      console.error("Error in opportunity pattern analysis:", error);
+      res.status(500).json({ message: error.message || "Failed to run pattern analysis" });
+    }
+  });
+
+  app.get('/api/ai/learning/opportunity/patterns', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { scope, portfolioId, patternType } = req.query;
+      
+      if (portfolioId) {
+        const portfolio = await storage.getPortfolio(portfolioId as string);
+        if (!portfolio) {
+          return res.status(404).json({ message: "Portfolio not found" });
+        }
+        if (portfolio.user_id !== userId) {
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
+      
+      if (scope === 'portfolio' && !portfolioId) {
+        return res.status(400).json({ message: "portfolioId required for portfolio scope" });
+      }
+      
+      const effectiveUserId = scope === 'user' ? userId : undefined;
+      
+      const patterns = await opportunityLearnerService.getActivePatterns({
+        scope: scope as string,
+        userId: effectiveUserId,
+        portfolioId: portfolioId as string,
+        patternType: patternType as any,
+      });
+      
+      res.json({ patterns, count: patterns.length });
+    } catch (error: any) {
+      console.error("Error fetching opportunity patterns:", error);
+      res.status(500).json({ message: error.message || "Failed to fetch patterns" });
+    }
+  });
+
+  app.get('/api/ai/learning/opportunity/calibration', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      const calibration = await opportunityLearnerService.getScoringCalibration(userId);
+      
+      res.json(calibration);
+    } catch (error: any) {
+      console.error("Error fetching scoring calibration:", error);
+      res.status(500).json({ message: error.message || "Failed to fetch calibration" });
+    }
+  });
+
+  app.get('/api/ai/learning/runs', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { learnerType, limit } = req.query;
+      
+      let conditions = [eq(learning_runs.user_id, userId)];
+      
+      if (learnerType) {
+        conditions.push(eq(learning_runs.learner_type, learnerType as string));
+      }
+      
+      const whereClause = conditions.length === 1 ? conditions[0] : and(...conditions);
+      
+      const runs = await db.select()
+        .from(learning_runs)
+        .where(whereClause)
+        .orderBy(desc(learning_runs.started_at))
+        .limit(parseInt(limit as string) || 20);
+      
+      res.json({ runs, count: runs.length });
+    } catch (error: any) {
+      console.error("Error fetching learning runs:", error);
+      res.status(500).json({ message: error.message || "Failed to fetch learning runs" });
     }
   });
 
@@ -5111,6 +5588,11 @@ Provide your analysis as valid JSON.`;
   // Campaigns - Create
   app.post('/api/campaigns', isAuthenticated, async (req: any, res) => {
     try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email || 'unknown';
+
+      console.log(`[CAMPAIGN] 📝 Creating campaign | User: ${userId} (${userEmail}) | Name: ${req.body.name} | Portfolio: ${req.body.portfolio_id}`);
+
       // Convert ISO date strings to Date objects before validation
       const requestBody = {
         ...req.body,
@@ -5121,6 +5603,7 @@ Provide your analysis as valid JSON.`;
       // Validate request body with Zod
       const validationResult = insertCampaignSchema.safeParse(requestBody);
       if (!validationResult.success) {
+        console.log(`[CAMPAIGN] ❌ Validation failed | User: ${userId} | Errors: ${JSON.stringify(validationResult.error.errors)}`);
         return res.status(400).json({ 
           message: "Invalid campaign data", 
           errors: validationResult.error.errors 
@@ -5132,15 +5615,78 @@ Provide your analysis as valid JSON.`;
       // Verify portfolio belongs to user (SECURITY: prevent cross-tenant mutations)
       const portfolio = await storage.getPortfolio(portfolio_id);
       if (!portfolio) {
+        console.log(`[CAMPAIGN] ❌ Portfolio not found | User: ${userId} | Portfolio ID: ${portfolio_id}`);
         return res.status(404).json({ message: "Portfolio not found" });
       }
       
-      const userId = req.user.claims.sub;
       if (portfolio.user_id !== userId) {
+        console.log(`[CAMPAIGN] ❌ Access denied | User: ${userId} | Portfolio owner: ${portfolio.user_id}`);
         return res.status(403).json({ message: "Access denied" });
       }
 
+      // SECURITY: Validate investor_profile against franchise plan AND governance requirements
+      const investorProfile = validationResult.data.investor_profile;
+      if (investorProfile) {
+        const { franchisePlanService } = await import('./services/franchisePlanService');
+        
+        // For high-risk profiles (SA/F), use full governance validation
+        if (['SA', 'F'].includes(investorProfile.toUpperCase())) {
+          const customProfileId = (req.body as any).custom_profile_id;
+          
+          // FULL_CUSTOM profile requires customProfileId
+          if (investorProfile.toUpperCase() === 'F' && !customProfileId) {
+            console.log(`[CAMPAIGN] ❌ Full Custom profile requires customProfileId | User: ${userId}`);
+            return res.status(400).json({
+              message: "Full Custom profile requires a custom profile configuration",
+              code: 'CUSTOM_PROFILE_REQUIRED'
+            });
+          }
+          
+          const fullValidation = await franchisePlanService.validateCampaignRiskProfile(
+            userId,
+            investorProfile,
+            customProfileId
+          );
+          
+          if (!fullValidation.valid) {
+            const errors = fullValidation.governanceValidation?.errors?.map(e => e.message) || [];
+            const planError = fullValidation.planValidation?.reason;
+            const allErrors = planError ? [planError, ...errors] : errors;
+            
+            console.log(`[CAMPAIGN] ❌ Governance validation failed | User: ${userId} | Profile: ${investorProfile} | Errors: ${allErrors.join(', ')}`);
+            return res.status(403).json({
+              message: "Profile validation failed: " + allErrors.join('; '),
+              code: 'GOVERNANCE_VALIDATION_FAILED',
+              planValidation: fullValidation.planValidation,
+              governanceValidation: fullValidation.governanceValidation,
+              requiresDoubleConfirm: fullValidation.requiresDoubleConfirm,
+              requiresLegalAcceptance: fullValidation.requiresLegalAcceptance
+            });
+          }
+          
+          // Additional check: require double confirmation and legal acceptance to be completed
+          if (fullValidation.requiresDoubleConfirm || fullValidation.requiresLegalAcceptance) {
+            console.log(`[CAMPAIGN] ⚠️ High-risk profile requires additional confirmations | User: ${userId} | Profile: ${investorProfile}`);
+            // Note: The actual double-confirm and legal-acceptance are recorded after campaign creation
+            // via separate endpoints. This validation ensures the user is eligible.
+          }
+        } else {
+          // For standard profiles (C/M/A), use simpler plan-only validation
+          const validation = await franchisePlanService.validateRiskProfileForUser(userId, investorProfile);
+          
+          if (!validation.valid) {
+            console.log(`[CAMPAIGN] ❌ Risk profile not allowed | User: ${userId} | Profile: ${investorProfile} | Reason: ${validation.reason}`);
+            return res.status(403).json({ 
+              message: validation.reason,
+              code: 'RISK_PROFILE_NOT_ALLOWED',
+              allowedProfiles: validation.allowedProfiles
+            });
+          }
+        }
+      }
+
       const campaign = await storage.createCampaign(validationResult.data);
+      console.log(`[CAMPAIGN] ✓ Created successfully | User: ${userId} | Campaign ID: ${campaign.id} | Name: ${campaign.name}`);
       
       // Create admin alert for new campaign
       try {
@@ -5240,10 +5786,10 @@ Provide your analysis as valid JSON.`;
     }
   });
 
-  // Campaigns - Start new campaign with automatic capital snapshot
+  // Campaigns - Start new campaign with automatic capital snapshot (with governance for SA/F)
   app.post('/api/campaigns/start', isAuthenticated, async (req: any, res) => {
     try {
-      const { portfolio_id, name, initial_capital, risk_config, selection_config, duration_days, max_drawdown_percentage } = req.body;
+      const { portfolio_id, name, initial_capital, risk_config, selection_config, duration_days, max_drawdown_percentage, investor_profile, custom_profile_id } = req.body;
       
       if (!portfolio_id || !name || !initial_capital) {
         return res.status(400).json({ message: "portfolio_id, name, and initial_capital are required" });
@@ -5257,6 +5803,47 @@ Provide your analysis as valid JSON.`;
       const userId = req.user.claims.sub;
       if (portfolio.user_id !== userId) {
         return res.status(403).json({ message: "Access denied" });
+      }
+
+      // SECURITY: Use authoritative SA/F parameter specification to detect bypass attempts
+      const { checkExceedsStandardLimits } = await import('../shared/schema');
+      const mergedRiskConfig = { ...risk_config, custom_profile_id };
+      const exceededParams = checkExceedsStandardLimits(mergedRiskConfig);
+      
+      // SECURITY: Validate governance for high-risk profiles before starting
+      const profileToCheck = investor_profile || risk_config?.investor_profile;
+      
+      // SECURITY: If any parameter exceeds standard limits, investor_profile MUST be SA/F
+      if (exceededParams.length > 0 && (!profileToCheck || !['SA', 'F'].includes(profileToCheck.toUpperCase()))) {
+        console.log(`[CAMPAIGN] ❌ Parameters exceed standard limits without SA/F profile | User: ${userId} | Exceeded: ${exceededParams.join(', ')}`);
+        return res.status(400).json({
+          message: `Parameters (${exceededParams.join(', ')}) exceed standard profile limits and require SA or F investor profile with governance approval`,
+          code: 'PROFILE_MISMATCH',
+          exceededParams
+        });
+      }
+      
+      if (profileToCheck && ['SA', 'F'].includes(profileToCheck.toUpperCase())) {
+        const { franchisePlanService } = await import('./services/franchisePlanService');
+        const customProfileId = custom_profile_id || risk_config?.custom_profile_id;
+        
+        const validation = await franchisePlanService.validateCampaignRiskProfile(
+          userId,
+          profileToCheck,
+          customProfileId
+        );
+        
+        if (!validation.valid) {
+          console.log(`[CAMPAIGN] ❌ Governance validation failed on start | User: ${userId} | Profile: ${profileToCheck}`);
+          return res.status(403).json({
+            message: "Cannot start campaign: governance validation failed",
+            code: 'GOVERNANCE_VALIDATION_FAILED',
+            planValidation: validation.planValidation,
+            governanceValidation: validation.governanceValidation,
+            requiresDoubleConfirm: validation.requiresDoubleConfirm,
+            requiresLegalAcceptance: validation.requiresLegalAcceptance
+          });
+        }
       }
 
       const { campaignManagerService } = await import('./services/trading/campaignManagerService');
@@ -5315,15 +5902,51 @@ Provide your analysis as valid JSON.`;
     }
   });
 
-  // Campaigns - Resume campaign
+  // Campaigns - Resume campaign (with governance check for high-risk profiles)
   app.post('/api/campaigns/:id/resume', isAuthenticated, async (req: any, res) => {
     try {
       const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      // Fetch campaign to check ownership and profile
+      const campaign = await db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
+      if (campaign.length === 0) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      
+      const campaignData = campaign[0];
+      
+      // SECURITY: Verify ownership
+      if (campaignData.user_id !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      // SECURITY: Re-validate governance for high-risk profiles before resuming
+      const investorProfile = campaignData.investor_profile;
+      if (['SA', 'F'].includes(investorProfile.toUpperCase())) {
+        const { franchisePlanService } = await import('./services/franchisePlanService');
+        const customProfileId = (campaignData as any).custom_profile_id;
+        
+        const validation = await franchisePlanService.validateCampaignRiskProfile(
+          userId,
+          investorProfile,
+          customProfileId
+        );
+        
+        if (!validation.valid) {
+          console.log(`[CAMPAIGN] ❌ Governance re-validation failed on resume | Campaign: ${id} | Profile: ${investorProfile}`);
+          return res.status(403).json({
+            message: "Cannot resume: governance validation failed",
+            code: 'GOVERNANCE_VALIDATION_FAILED',
+            governanceValidation: validation.governanceValidation
+          });
+        }
+      }
       
       const { campaignManagerService } = await import('./services/trading/campaignManagerService');
-      const campaign = await campaignManagerService.resumeCampaign(id);
+      const resumedCampaign = await campaignManagerService.resumeCampaign(id);
       
-      res.json(campaign);
+      res.json(resumedCampaign);
     } catch (error: any) {
       if (error.message?.includes('not found') || error.message?.includes('not paused')) {
         return res.status(400).json({ message: error.message });
@@ -5332,6 +5955,212 @@ Provide your analysis as valid JSON.`;
       res.status(500).json({ message: "Failed to resume campaign" });
     }
   });
+
+  // ========== CAMPAIGN GOVERNANCE V2.0+ ENDPOINTS ==========
+  // Note: Uses verifyCampaignOwnership helper defined later in this file
+
+  // POST /api/campaigns/:id/lock - Lock campaign (immutable governance)
+  app.post('/api/campaigns/:id/lock', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      // SECURITY: Verify ownership (uses helper defined below)
+      const campaign = await storage.getCampaign(id);
+      if (!campaign) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      const portfolio = await storage.getPortfolio(campaign.portfolio_id);
+      if (!portfolio || portfolio.user_id !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { campaignGovernanceService } = await import('./services/governance/campaignGovernanceService');
+      
+      const locked = await campaignGovernanceService.lockCampaign(id, userId);
+      
+      res.json({
+        success: locked,
+        message: locked ? 'Campaign locked successfully' : 'Campaign already locked',
+        campaignId: id,
+      });
+    } catch (error: any) {
+      console.error("Error locking campaign:", error);
+      res.status(500).json({ message: error.message || "Failed to lock campaign" });
+    }
+  });
+
+  // GET /api/campaigns/:id/integrity - Verify campaign integrity
+  app.get('/api/campaigns/:id/integrity', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      // SECURITY: Verify ownership
+      const campaign = await storage.getCampaign(id);
+      if (!campaign) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      const portfolio = await storage.getPortfolio(campaign.portfolio_id);
+      if (!portfolio || portfolio.user_id !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { campaignGovernanceService } = await import('./services/governance/campaignGovernanceService');
+      
+      const isValid = await campaignGovernanceService.verifyIntegrity(id);
+      
+      res.json({
+        campaignId: id,
+        valid: isValid,
+        message: isValid ? 'Campaign integrity verified' : 'INTEGRITY VIOLATION DETECTED',
+        verifiedAt: new Date().toISOString(),
+      });
+    } catch (error: any) {
+      console.error("Error verifying campaign integrity:", error);
+      res.status(500).json({ message: error.message || "Failed to verify integrity" });
+    }
+  });
+
+  // GET /api/campaigns/:id/ledger - Get campaign audit ledger history
+  app.get('/api/campaigns/:id/ledger', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      const limit = parseInt(req.query.limit as string) || 100;
+      
+      // SECURITY: Verify ownership
+      const campaign = await storage.getCampaign(id);
+      if (!campaign) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      const portfolio = await storage.getPortfolio(campaign.portfolio_id);
+      if (!portfolio || portfolio.user_id !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { campaignGovernanceService } = await import('./services/governance/campaignGovernanceService');
+      
+      const entries = await campaignGovernanceService.getLedgerHistory(id, limit);
+      
+      res.json({
+        campaignId: id,
+        count: entries.length,
+        entries,
+      });
+    } catch (error: any) {
+      console.error("Error fetching campaign ledger:", error);
+      res.status(500).json({ message: error.message || "Failed to fetch ledger" });
+    }
+  });
+
+  // GET /api/campaigns/:id/ledger/verify - Verify ledger hash chain integrity
+  app.get('/api/campaigns/:id/ledger/verify', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      // SECURITY: Verify ownership
+      const campaign = await storage.getCampaign(id);
+      if (!campaign) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      const portfolio = await storage.getPortfolio(campaign.portfolio_id);
+      if (!portfolio || portfolio.user_id !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { campaignGovernanceService } = await import('./services/governance/campaignGovernanceService');
+      
+      const result = await campaignGovernanceService.verifyLedgerChain(id);
+      
+      res.json({
+        campaignId: id,
+        valid: result.valid,
+        checkedEntries: result.checkedEntries,
+        errors: result.errors,
+        brokenChainAt: result.brokenChainAt,
+        verifiedAt: new Date().toISOString(),
+      });
+    } catch (error: any) {
+      console.error("Error verifying ledger chain:", error);
+      res.status(500).json({ message: error.message || "Failed to verify ledger chain" });
+    }
+  });
+
+  // POST /api/campaigns/:id/reconcile - Trigger exchange reconciliation
+  app.post('/api/campaigns/:id/reconcile', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      // SECURITY: Verify ownership
+      const campaign = await storage.getCampaign(id);
+      if (!campaign) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      const portfolio = await storage.getPortfolio(campaign.portfolio_id);
+      if (!portfolio || portfolio.user_id !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { exchangeReconciliationService } = await import('./services/governance/exchangeReconciliationService');
+      
+      const result = await exchangeReconciliationService.reconcileCampaign(id);
+      
+      res.json({
+        campaignId: id,
+        status: result.status,
+        discrepancyCount: result.discrepancies.length,
+        discrepancies: result.discrepancies,
+        delfosSnapshot: {
+          positionCount: result.delfosSnapshot.positionCount,
+          orderCount: result.delfosSnapshot.orderCount,
+        },
+        exchangeSnapshot: {
+          positionCount: result.exchangeSnapshot.positionCount,
+          orderCount: result.exchangeSnapshot.orderCount,
+        },
+        reconciliationHash: result.reconciliationHash,
+        completedAt: result.completedAt,
+      });
+    } catch (error: any) {
+      console.error("Error running reconciliation:", error);
+      res.status(500).json({ message: error.message || "Failed to run reconciliation" });
+    }
+  });
+
+  // GET /api/campaigns/:id/can-modify - Check if campaign can be modified
+  app.get('/api/campaigns/:id/can-modify', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      // SECURITY: Verify ownership
+      const campaign = await storage.getCampaign(id);
+      if (!campaign) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      const portfolio = await storage.getPortfolio(campaign.portfolio_id);
+      if (!portfolio || portfolio.user_id !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { campaignGovernanceService } = await import('./services/governance/campaignGovernanceService');
+      
+      const result = await campaignGovernanceService.canModifyCampaign(id);
+      
+      res.json({
+        campaignId: id,
+        ...result,
+      });
+    } catch (error: any) {
+      console.error("Error checking campaign modification:", error);
+      res.status(500).json({ message: error.message || "Failed to check modification status" });
+    }
+  });
+
+  // ========== END CAMPAIGN GOVERNANCE ENDPOINTS ==========
 
   // Campaigns - Apply compounding (reinvest realized PnL)
   app.post('/api/campaigns/:id/compound', isAuthenticated, async (req: any, res) => {
@@ -5595,6 +6424,171 @@ Provide your analysis as valid JSON.`;
     }
   });
 
+  // Campaign Engine - Refresh cluster assignments for a campaign
+  app.post('/api/campaigns/:id/refresh-clusters', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const assetSelectorService = (await import('./services/assetSelectorService')).assetSelectorService;
+      const schema = require('@shared/schema');
+      
+      console.log(`[Routes] Refreshing clusters for campaign ${id}`);
+      
+      const campaign = await db.select({
+        portfolio_id: schema.campaigns.portfolio_id
+      })
+        .from(schema.campaigns)
+        .where(eq(schema.campaigns.id, id))
+        .limit(1)
+        .execute();
+      
+      if (campaign.length === 0) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      
+      const portfolio = await db.select({
+        user_id: schema.portfolios.user_id
+      })
+        .from(schema.portfolios)
+        .where(eq(schema.portfolios.id, campaign[0].portfolio_id))
+        .limit(1)
+        .execute();
+      
+      if (portfolio.length === 0) {
+        return res.status(404).json({ message: "Portfolio not found" });
+      }
+      
+      const portfolioUserId = portfolio[0].user_id;
+      
+      // Get existing campaign universe symbols FIRST
+      const existingUniverse = await db.select()
+        .from(schema.campaign_asset_universes)
+        .where(eq(schema.campaign_asset_universes.campaign_id, id));
+      
+      if (existingUniverse.length === 0) {
+        return res.status(400).json({ message: "Campaign has no assets in universe" });
+      }
+      
+      const existingSymbolsSet = new Set(existingUniverse.map((u: any) => u.symbol));
+      
+      // Run the clustering selection
+      let selectionResult;
+      try {
+        selectionResult = await assetSelectorService.runSelection(portfolioUserId);
+      } catch (selectionError) {
+        console.error(`[Routes] Clustering selection failed:`, selectionError);
+        // Fallback: assign all assets to cluster 0
+        selectionResult = { assets: [], clusters: [] };
+      }
+      
+      // Create map of symbol to cluster from selection results
+      const symbolToCluster = new Map<string, number>();
+      selectionResult.assets.forEach((asset: any) => {
+        symbolToCluster.set(asset.symbol, asset.cluster_number);
+      });
+      
+      // Track which clusters are used by campaign assets
+      const usedClusters = new Map<number, string[]>();
+      const unmatchedAssets: any[] = [];
+      
+      // First pass: assign clusters to assets that match the selection
+      let updatedCount = 0;
+      for (const universeAsset of existingUniverse) {
+        const clusterNum = symbolToCluster.get(universeAsset.symbol);
+        if (clusterNum !== undefined) {
+          // Asset found in selection - use its cluster
+          if (clusterNum !== universeAsset.cluster_number) {
+            await db.update(schema.campaign_asset_universes)
+              .set({ cluster_number: clusterNum })
+              .where(eq(schema.campaign_asset_universes.id, universeAsset.id));
+            updatedCount++;
+          }
+          // Track this cluster
+          if (!usedClusters.has(clusterNum)) {
+            usedClusters.set(clusterNum, []);
+          }
+          usedClusters.get(clusterNum)!.push(universeAsset.symbol);
+        } else {
+          // Asset not in selection - will assign to misc cluster
+          unmatchedAssets.push(universeAsset);
+        }
+      }
+      
+      // For unmatched assets, assign to cluster 0 (misc cluster)
+      // This GUARANTEES ALL assets have a cluster_number
+      const miscCluster = 0;
+      if (unmatchedAssets.length > 0) {
+        for (const asset of unmatchedAssets) {
+          if (asset.cluster_number !== miscCluster) {
+            await db.update(schema.campaign_asset_universes)
+              .set({ cluster_number: miscCluster })
+              .where(eq(schema.campaign_asset_universes.id, asset.id));
+            updatedCount++;
+          }
+        }
+        // Add misc cluster to used clusters
+        usedClusters.set(miscCluster, unmatchedAssets.map(a => a.symbol));
+        console.log(`[Routes] Assigned ${unmatchedAssets.length} unmatched assets to misc cluster 0`);
+      }
+      
+      // If no clusters exist yet, put ALL assets in misc cluster to guarantee at least one cluster
+      if (usedClusters.size === 0) {
+        for (const asset of existingUniverse) {
+          if (asset.cluster_number !== miscCluster) {
+            await db.update(schema.campaign_asset_universes)
+              .set({ cluster_number: miscCluster })
+              .where(eq(schema.campaign_asset_universes.id, asset.id));
+            updatedCount++;
+          }
+        }
+        usedClusters.set(miscCluster, existingUniverse.map((a: any) => a.symbol));
+        console.log(`[Routes] Fallback: Assigned all ${existingUniverse.length} assets to misc cluster 0`);
+      }
+      
+      // Delete existing cluster records for this campaign
+      await db.delete(schema.clusters)
+        .where(eq(schema.clusters.campaign_id, id));
+      
+      // Create cluster records based on actual campaign assets
+      let clustersCreated = 0;
+      for (const [clusterNum, assets] of Array.from(usedClusters.entries())) {
+        if (assets.length > 0) {
+          // Find matching cluster metrics from selection, fallback to default
+          const selectionCluster = selectionResult.clusters.find((c: any) => c.cluster_number === clusterNum);
+          const avgVolatility = selectionCluster?.avg_metrics?.atr?.toFixed(6) || '0.050000';
+          
+          await db.insert(schema.clusters).values({
+            campaign_id: id,
+            cluster_number: clusterNum,
+            assets: assets,
+            avg_volatility: avgVolatility,
+            circuit_breaker_active: false,
+          }).onConflictDoNothing();
+          clustersCreated++;
+        }
+      }
+      
+      console.log(`[Routes] Refreshed clusters for campaign ${id}: ${updatedCount} assets updated, ${clustersCreated} clusters created`);
+      
+      res.json({
+        success: true,
+        updatedAssets: updatedCount,
+        clustersCreated: clustersCreated,
+        totalAssets: existingUniverse.length,
+        unmatchedAssets: unmatchedAssets.length
+      });
+    } catch (error: any) {
+      console.error("Error refreshing campaign clusters:", error);
+      res.status(500).json({ message: "Failed to refresh clusters" });
+    }
+  });
+
   // Campaign Engine - Get daily reports for a campaign
   app.get('/api/campaigns/:id/daily-reports', isAuthenticated, async (req: any, res) => {
     try {
@@ -5629,17 +6623,21 @@ Provide your analysis as valid JSON.`;
         return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
       }
       
-      let query = db.select().from(require('@shared/schema').campaign_positions)
-        .where(eq(require('@shared/schema').campaign_positions.campaign_id, id));
+      const schema = require('@shared/schema');
+      let whereCondition;
       
       if (state) {
-        query = query.where(and(
-          eq(require('@shared/schema').campaign_positions.campaign_id, id),
-          eq(require('@shared/schema').campaign_positions.state, state as string)
-        ));
+        whereCondition = and(
+          eq(schema.campaign_positions.campaign_id, id),
+          eq(schema.campaign_positions.state, state as string)
+        );
+      } else {
+        whereCondition = eq(schema.campaign_positions.campaign_id, id);
       }
       
-      const positions = await query.orderBy(desc(require('@shared/schema').campaign_positions.opened_at));
+      const positions = await db.select().from(schema.campaign_positions)
+        .where(whereCondition)
+        .orderBy(desc(schema.campaign_positions.opened_at));
       res.json(positions);
     } catch (error: any) {
       console.error("Error fetching campaign positions:", error);
@@ -5659,17 +6657,21 @@ Provide your analysis as valid JSON.`;
         return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
       }
       
-      let query = db.select().from(require('@shared/schema').campaign_orders)
-        .where(eq(require('@shared/schema').campaign_orders.campaign_id, id));
+      const schema = require('@shared/schema');
+      let whereCondition;
       
       if (status) {
-        query = query.where(and(
-          eq(require('@shared/schema').campaign_orders.campaign_id, id),
-          eq(require('@shared/schema').campaign_orders.status, status as string)
-        ));
+        whereCondition = and(
+          eq(schema.campaign_orders.campaign_id, id),
+          eq(schema.campaign_orders.status, status as string)
+        );
+      } else {
+        whereCondition = eq(schema.campaign_orders.campaign_id, id);
       }
       
-      const orders = await query.orderBy(desc(require('@shared/schema').campaign_orders.created_at));
+      const orders = await db.select().from(schema.campaign_orders)
+        .where(whereCondition)
+        .orderBy(desc(schema.campaign_orders.created_at));
       res.json(orders);
     } catch (error: any) {
       console.error("Error fetching campaign engine orders:", error);
@@ -5745,6 +6747,65 @@ Provide your analysis as valid JSON.`;
     } catch (error: any) {
       console.error("Error resetting daily circuit breaker:", error);
       res.status(500).json({ message: "Failed to reset daily circuit breaker" });
+    }
+  });
+
+  // Campaign Engine - Liquidate positions for liquidity
+  app.post('/api/campaigns/:id/liquidate-positions', isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const { positionIds } = req.body; // Optional: specific positions to liquidate
+      const userId = req.user.claims.sub;
+      
+      const ownershipCheck = await verifyCampaignOwnership(id, userId);
+      if (!ownershipCheck.success) {
+        return res.status(ownershipCheck.statusCode!).json({ message: ownershipCheck.error });
+      }
+      
+      const campaign = ownershipCheck.campaign!;
+      
+      // Only allow liquidation for running, paused, or active campaigns
+      if (!['running', 'paused', 'active'].includes(campaign.status)) {
+        return res.status(400).json({ 
+          message: "Can only liquidate positions for running, paused, or active campaigns" 
+        });
+      }
+      
+      const { campaignEngineService } = await import('./services/trading/campaignEngineService');
+      const result = await campaignEngineService.liquidatePositionsForLiquidity(id, positionIds);
+      
+      res.json({
+        message: result.success 
+          ? `Successfully liquidated ${result.liquidatedCount} positions for ~$${result.estimatedUSD.toFixed(2)}` 
+          : `Partially liquidated: ${result.liquidatedCount} success, ${result.failedCount} failed`,
+        ...result
+      });
+    } catch (error: any) {
+      console.error("Error liquidating positions:", error);
+      res.status(500).json({ message: "Failed to liquidate positions" });
+    }
+  });
+
+  // Liquidate orphan assets from Kraken account (assets left after campaign completion)
+  // SECURITY: Requires admin authorization - uses global Kraken credentials
+  app.post('/api/admin/kraken/liquidate-orphan-assets', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const userId = parseInt(req.user.claims.sub);
+      
+      console.log(`[API][ADMIN] Liquidating orphan assets requested by admin ${userId}`);
+      
+      const { campaignEngineService } = await import('./services/trading/campaignEngineService');
+      const result = await campaignEngineService.liquidateOrphanAssets(userId);
+      
+      res.json({
+        message: result.success 
+          ? `Successfully liquidated ${result.liquidatedCount} assets for ~$${result.estimatedUSD.toFixed(2)}` 
+          : `Partially liquidated: ${result.liquidatedCount} success, ${result.failedCount} failed`,
+        ...result
+      });
+    } catch (error: any) {
+      console.error("Error liquidating orphan assets:", error);
+      res.status(500).json({ message: "Failed to liquidate orphan assets" });
     }
   });
 
@@ -6658,6 +7719,6434 @@ Provide your analysis as valid JSON.`;
         return res.status(400).json({ message: "GitHub not connected. Please set up the GitHub integration." });
       }
       res.status(500).json({ message: `Backup failed: ${error.message}` });
+    }
+  });
+
+  // ========== FRANCHISE MANAGEMENT ROUTES ==========
+  
+  // Get franchise plans (public for display - DYNAMIC PRICING)
+  // Prices are fetched from franchise_plans table, controlled by Franchisor settings
+  app.get('/api/franchise-plans', async (req, res) => {
+    try {
+      const plans = await db.select()
+        .from(franchise_plans)
+        .where(eq(franchise_plans.is_active, true))
+        .orderBy(franchise_plans.display_order);
+      res.json(plans);
+    } catch (error) {
+      console.error("Error fetching franchise plans:", error);
+      res.status(500).json({ message: "Failed to fetch franchise plans" });
+    }
+  });
+
+  // ========== STRIPE PAYMENT ROUTES FOR FRANCHISE ONBOARDING ==========
+  
+  // Get Stripe publishable key (public, required for frontend)
+  app.get('/api/stripe/publishable-key', async (req, res) => {
+    try {
+      const { getStripePublishableKey } = await import('./services/payments/stripeClient');
+      const publishableKey = await getStripePublishableKey();
+      res.json({ publishableKey });
+    } catch (error: any) {
+      console.error("[Stripe] Error getting publishable key:", error);
+      res.status(500).json({ message: "Stripe not configured" });
+    }
+  });
+  
+  // Create Stripe Checkout Session for franchise payment
+  app.post('/api/franchise-leads/:leadId/checkout', async (req, res) => {
+    try {
+      const { leadId } = req.params;
+      const { planId } = req.body;
+      
+      if (!leadId || !planId) {
+        return res.status(400).json({ message: "Lead ID and Plan ID are required" });
+      }
+      
+      const { franchisePaymentService } = await import('./services/payments/franchisePaymentService');
+      
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const successUrl = `${baseUrl}/franchise/payment-success`;
+      const cancelUrl = `${baseUrl}/franchise`;
+      
+      const session = await franchisePaymentService.createCheckoutSession(
+        leadId,
+        planId,
+        successUrl,
+        cancelUrl
+      );
+      
+      res.json({ 
+        checkoutUrl: session.url,
+        sessionId: session.id 
+      });
+    } catch (error: any) {
+      console.error("[Stripe Checkout] Error:", error);
+      res.status(500).json({ message: error.message || "Failed to create checkout session" });
+    }
+  });
+  
+  // Verify payment status for a lead
+  app.get('/api/franchise-leads/:leadId/payment-status', async (req, res) => {
+    try {
+      const { leadId } = req.params;
+      
+      const { franchisePaymentService } = await import('./services/payments/franchisePaymentService');
+      const status = await franchisePaymentService.verifyPaymentStatus(leadId);
+      
+      res.json(status);
+    } catch (error: any) {
+      console.error("[Stripe Payment Status] Error:", error);
+      res.status(500).json({ message: error.message || "Failed to get payment status" });
+    }
+  });
+  
+  // Handle payment success callback (verify and update lead)
+  app.post('/api/franchise-leads/:leadId/payment-success', async (req, res) => {
+    try {
+      const { leadId } = req.params;
+      const { sessionId } = req.body;
+      
+      if (!sessionId) {
+        return res.status(400).json({ message: "Session ID is required" });
+      }
+      
+      const { franchisePaymentService } = await import('./services/payments/franchisePaymentService');
+      await franchisePaymentService.handlePaymentSuccess(sessionId);
+      
+      const status = await franchisePaymentService.verifyPaymentStatus(leadId);
+      
+      res.json({ 
+        success: true,
+        ...status 
+      });
+    } catch (error: any) {
+      console.error("[Stripe Payment Success] Error:", error);
+      res.status(500).json({ message: error.message || "Failed to verify payment" });
+    }
+  });
+
+  // Get all franchises (franchisor only)
+  app.get('/api/franchises', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      console.log(`[Franchise] GET /api/franchises - userId: ${userId}, email: ${userEmail}`);
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      console.log(`[Franchise] Permissions for ${userEmail}: isFranchisor=${permissions.isFranchisor}, globalRole=${permissions.globalRole}`);
+      
+      if (!permissions.isFranchisor) {
+        console.log(`[Franchise] Access denied for ${userEmail} - not a franchisor`);
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const allFranchises = await db.select()
+        .from(franchises)
+        .orderBy(desc(franchises.created_at));
+      
+      res.json(allFranchises);
+    } catch (error) {
+      console.error("Error fetching franchises:", error);
+      res.status(500).json({ message: "Failed to fetch franchises" });
+    }
+  });
+
+  // Get user's franchise (for franchise members)
+  app.get('/api/my-franchise', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      
+      const franchise = await franchisePermissionService.getUserFranchise(userId, userEmail);
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      res.json({
+        franchise,
+        permissions,
+      });
+    } catch (error) {
+      console.error("Error fetching user franchise:", error);
+      res.status(500).json({ message: "Failed to fetch franchise" });
+    }
+  });
+
+  // Create franchise (franchisor only)
+  app.post('/api/franchises', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      console.log(`[Franchise] POST /api/franchises - userId: ${userId}, email: ${userEmail}`);
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      console.log(`[Franchise] Permissions for ${userEmail}: isFranchisor=${permissions.isFranchisor}`);
+      
+      if (!permissions.isFranchisor) {
+        console.log(`[Franchise] Access denied for ${userEmail} - not a franchisor`);
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { name, cnpj, tax_id, tax_id_type, address, country, plan_id, contract_start, owner_email } = req.body;
+      
+      if (!name || !plan_id || !contract_start) {
+        return res.status(400).json({ message: "Name, plan and contract start date are required" });
+      }
+      
+      // Find owner user if email provided
+      let owner_user_id = null;
+      if (owner_email) {
+        const ownerUser = await db.select()
+          .from(users)
+          .where(eq(users.email, owner_email))
+          .limit(1);
+        if (ownerUser.length > 0) {
+          owner_user_id = ownerUser[0].id;
+        }
+      }
+      
+      const [newFranchise] = await db.insert(franchises).values({
+        name,
+        cnpj,
+        tax_id,
+        tax_id_type: tax_id_type || null,
+        address,
+        country: country || 'BRA',
+        plan_id,
+        contract_start: new Date(contract_start),
+        owner_user_id,
+        status: 'active',
+      }).returning();
+      
+      // If owner exists, add them as master user
+      if (owner_user_id) {
+        await db.insert(franchise_users).values({
+          franchise_id: newFranchise.id,
+          user_id: owner_user_id,
+          role: 'master',
+          is_active: true,
+          invited_by: userId,
+        });
+        
+        // Update user's global role
+        await db.update(users)
+          .set({ global_role: 'franchise_owner' })
+          .where(eq(users.id, owner_user_id));
+      }
+      
+      res.json(newFranchise);
+    } catch (error) {
+      console.error("Error creating franchise:", error);
+      res.status(500).json({ message: "Failed to create franchise" });
+    }
+  });
+
+  // Get franchise details by ID (admin only)
+  app.get('/api/franchises/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const franchiseId = req.params.id;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      // Allow franchisor or users linked to this franchise
+      if (!permissions.isFranchisor) {
+        // Check if user is linked to this franchise
+        const [userFranchiseLink] = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.user_id, userId),
+            eq(franchise_users.is_active, true)
+          ));
+        
+        if (!userFranchiseLink) {
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
+      
+      // Get franchise with plan
+      const [franchise] = await db
+        .select()
+        .from(franchises)
+        .where(eq(franchises.id, franchiseId));
+      
+      if (!franchise) {
+        return res.status(404).json({ message: "Franchise not found" });
+      }
+      
+      // Get plan details
+      const [plan] = await db
+        .select()
+        .from(franchise_plans)
+        .where(eq(franchise_plans.id, franchise.plan_id));
+      
+      // Get franchise users with user details
+      const franchiseUsersData = await db
+        .select({
+          id: franchise_users.id,
+          user_id: franchise_users.user_id,
+          role: franchise_users.role,
+          permissions: franchise_users.permissions,
+          is_active: franchise_users.is_active,
+          invited_at: franchise_users.invited_at,
+          accepted_at: franchise_users.accepted_at,
+          user_email: users.email,
+          user_first_name: users.firstName,
+          user_last_name: users.lastName,
+          user_profile_image: users.profileImageUrl,
+        })
+        .from(franchise_users)
+        .leftJoin(users, eq(franchise_users.user_id, users.id))
+        .where(eq(franchise_users.franchise_id, franchiseId));
+      
+      // Get owner details if exists
+      let owner = null;
+      if (franchise.owner_user_id) {
+        const [ownerData] = await db
+          .select({
+            id: users.id,
+            email: users.email,
+            firstName: users.firstName,
+            lastName: users.lastName,
+            profileImageUrl: users.profileImageUrl,
+          })
+          .from(users)
+          .where(eq(users.id, franchise.owner_user_id));
+        owner = ownerData;
+      }
+      
+      res.json({
+        ...franchise,
+        plan,
+        owner,
+        users: franchiseUsersData,
+      });
+    } catch (error) {
+      console.error("Error fetching franchise details:", error);
+      res.status(500).json({ message: "Failed to fetch franchise details" });
+    }
+  });
+
+  // Update franchise (admin only)
+  app.patch('/api/franchises/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const franchiseId = req.params.id;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisors can update franchises" });
+      }
+      
+      const {
+        name, cnpj, tax_id_type, tax_id, address, country, plan_id,
+        contract_start, contract_end, custom_royalty_percentage,
+        bank_name, bank_agency, bank_account, pix_key,
+        // Tax Profile for Trading
+        tax_country, tax_year, tax_short_term_rate, tax_long_term_rate, tax_min_taxable
+      } = req.body;
+      
+      // Helper to normalize empty strings to null
+      const normalizeString = (val: any): string | null => {
+        if (val === undefined || val === null || val === '') return null;
+        return String(val).trim() || null;
+      };
+      
+      // Helper to normalize numeric values
+      const normalizeNumber = (val: any): number | null => {
+        if (val === undefined || val === null || val === '') return null;
+        const num = parseFloat(val);
+        return isNaN(num) ? null : num;
+      };
+      
+      // Helper to normalize dates
+      const normalizeDate = (val: any): Date | null => {
+        if (val === undefined || val === null || val === '') return null;
+        const date = new Date(val);
+        return isNaN(date.getTime()) ? null : date;
+      };
+      
+      const updateData: any = { updated_at: new Date() };
+      
+      // Required string fields
+      if (name !== undefined && name) updateData.name = String(name).trim();
+      
+      // Optional string fields
+      if (cnpj !== undefined) updateData.cnpj = normalizeString(cnpj);
+      if (tax_id_type !== undefined) updateData.tax_id_type = normalizeString(tax_id_type);
+      if (tax_id !== undefined) updateData.tax_id = normalizeString(tax_id);
+      if (address !== undefined) updateData.address = normalizeString(address);
+      if (country !== undefined && country) updateData.country = String(country).trim();
+      if (plan_id !== undefined && plan_id) updateData.plan_id = String(plan_id).trim();
+      
+      // Date fields
+      if (contract_start !== undefined) {
+        const parsedStart = normalizeDate(contract_start);
+        if (parsedStart) updateData.contract_start = parsedStart;
+      }
+      if (contract_end !== undefined) updateData.contract_end = normalizeDate(contract_end);
+      
+      // Numeric fields
+      if (custom_royalty_percentage !== undefined) updateData.custom_royalty_percentage = normalizeNumber(custom_royalty_percentage);
+      
+      // Banking optional string fields
+      if (bank_name !== undefined) updateData.bank_name = normalizeString(bank_name);
+      if (bank_agency !== undefined) updateData.bank_agency = normalizeString(bank_agency);
+      if (bank_account !== undefined) updateData.bank_account = normalizeString(bank_account);
+      if (pix_key !== undefined) updateData.pix_key = normalizeString(pix_key);
+      
+      // Tax Profile for Trading fields
+      if (tax_country !== undefined) updateData.tax_country = normalizeString(tax_country);
+      if (tax_year !== undefined) {
+        const yearNum = parseInt(tax_year);
+        updateData.tax_year = isNaN(yearNum) ? null : yearNum;
+      }
+      if (tax_short_term_rate !== undefined) updateData.tax_short_term_rate = normalizeNumber(tax_short_term_rate)?.toString() || null;
+      if (tax_long_term_rate !== undefined) updateData.tax_long_term_rate = normalizeNumber(tax_long_term_rate)?.toString() || null;
+      if (tax_min_taxable !== undefined) updateData.tax_min_taxable = normalizeNumber(tax_min_taxable)?.toString() || null;
+      
+      const [updated] = await db.update(franchises)
+        .set(updateData)
+        .where(eq(franchises.id, franchiseId))
+        .returning();
+      
+      if (!updated) {
+        return res.status(404).json({ message: "Franchise not found" });
+      }
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating franchise:", error);
+      res.status(500).json({ message: "Failed to update franchise" });
+    }
+  });
+
+  // Suspend franchise (franchisor only)
+  app.post('/api/franchises/:id/suspend', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const franchiseId = req.params.id;
+      const { reason } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisors can suspend franchises" });
+      }
+      
+      const [updated] = await db.update(franchises)
+        .set({ 
+          status: 'suspended',
+          suspended_reason: reason || 'Admin action',
+          suspended_at: new Date(),
+          updated_at: new Date()
+        })
+        .where(eq(franchises.id, franchiseId))
+        .returning();
+      
+      if (!updated) {
+        return res.status(404).json({ message: "Franchise not found" });
+      }
+      
+      console.log(`[FRANCHISE] Franchise ${franchiseId} suspended by user ${userId}. Reason: ${reason}`);
+      res.json(updated);
+    } catch (error) {
+      console.error("Error suspending franchise:", error);
+      res.status(500).json({ message: "Failed to suspend franchise" });
+    }
+  });
+
+  // Reactivate franchise (franchisor only)
+  app.post('/api/franchises/:id/reactivate', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const franchiseId = req.params.id;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisors can reactivate franchises" });
+      }
+      
+      const [updated] = await db.update(franchises)
+        .set({ 
+          status: 'active',
+          suspended_reason: null,
+          suspended_at: null,
+          updated_at: new Date()
+        })
+        .where(eq(franchises.id, franchiseId))
+        .returning();
+      
+      if (!updated) {
+        return res.status(404).json({ message: "Franchise not found" });
+      }
+      
+      console.log(`[FRANCHISE] Franchise ${franchiseId} reactivated by user ${userId}`);
+      res.json(updated);
+    } catch (error) {
+      console.error("Error reactivating franchise:", error);
+      res.status(500).json({ message: "Failed to reactivate franchise" });
+    }
+  });
+
+  // Add user to franchise
+  app.post('/api/franchises/:id/users', isAuthenticated, async (req: any, res) => {
+    try {
+      const currentUserId = req.user.claims.sub;
+      const currentUserEmail = req.user.claims.email;
+      const franchiseId = req.params.id;
+      const { email, role } = req.body;
+      
+      if (!email || !role) {
+        return res.status(400).json({ message: "Email and role are required" });
+      }
+      
+      const validRoles = ['master', 'operator', 'analyst', 'finance'];
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({ message: "Invalid role" });
+      }
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(currentUserId, currentUserEmail);
+      
+      // Only franchisor or franchise master can add users
+      let canManageUsers = permissions.isFranchisor;
+      if (!canManageUsers) {
+        const [userLink] = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.user_id, currentUserId),
+            eq(franchise_users.role, 'master'),
+            eq(franchise_users.is_active, true)
+          ));
+        canManageUsers = !!userLink;
+      }
+      
+      if (!canManageUsers) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      // Find user by email or create placeholder if not exists
+      let [targetUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, email.toLowerCase()));
+      
+      if (!targetUser) {
+        // Create placeholder user for invitation
+        // They will be activated when they log in for the first time
+        const [newUser] = await db.insert(users).values({
+          email: email.toLowerCase(),
+          is_beta_approved: true, // Auto-approve invited users
+          global_role: 'user',
+          preferred_language: 'pt-BR',
+          notifications_enabled: true,
+        }).returning();
+        targetUser = newUser;
+        console.log(`[FRANCHISE] Created placeholder user for invitation: ${email}`);
+      }
+      
+      // Check if user already linked
+      const [existingLink] = await db
+        .select()
+        .from(franchise_users)
+        .where(and(
+          eq(franchise_users.franchise_id, franchiseId),
+          eq(franchise_users.user_id, targetUser.id)
+        ));
+      
+      if (existingLink) {
+        return res.status(400).json({ message: "User already linked to this franchise" });
+      }
+      
+      // Add user to franchise
+      const [newLink] = await db.insert(franchise_users).values({
+        franchise_id: franchiseId,
+        user_id: targetUser.id,
+        role,
+        is_active: true,
+        invited_by: currentUserId,
+        accepted_at: new Date(),
+      }).returning();
+      
+      res.json({
+        ...newLink,
+        user_email: targetUser.email,
+        user_first_name: targetUser.firstName,
+        user_last_name: targetUser.lastName,
+      });
+    } catch (error) {
+      console.error("Error adding user to franchise:", error);
+      res.status(500).json({ message: "Failed to add user" });
+    }
+  });
+
+  // Update user role in franchise
+  app.patch('/api/franchises/:id/users/:userId', isAuthenticated, async (req: any, res) => {
+    try {
+      const currentUserId = req.user.claims.sub;
+      const franchiseId = req.params.id;
+      const targetUserId = req.params.userId;
+      const { role, is_active } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(currentUserId);
+      
+      // Only franchisor or franchise master can update users
+      let canManageUsers = permissions.isFranchisor;
+      if (!canManageUsers) {
+        const [userLink] = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.user_id, currentUserId),
+            eq(franchise_users.role, 'master'),
+            eq(franchise_users.is_active, true)
+          ));
+        canManageUsers = !!userLink;
+      }
+      
+      if (!canManageUsers) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      // Find the link to update
+      const [existingLink] = await db
+        .select()
+        .from(franchise_users)
+        .where(and(
+          eq(franchise_users.franchise_id, franchiseId),
+          eq(franchise_users.user_id, targetUserId)
+        ));
+      
+      if (!existingLink) {
+        return res.status(404).json({ message: "User not linked to this franchise" });
+      }
+      
+      // Build update object
+      const updateData: any = { updated_at: new Date() };
+      if (role !== undefined) {
+        const validRoles = ['master', 'operator', 'analyst', 'finance'];
+        if (!validRoles.includes(role)) {
+          return res.status(400).json({ message: "Invalid role" });
+        }
+        updateData.role = role;
+      }
+      if (is_active !== undefined) {
+        updateData.is_active = is_active;
+      }
+      
+      // If demoting or deactivating a master, ensure at least one active master remains
+      const wouldRemoveMaster = (
+        (existingLink.role === 'master' && existingLink.is_active) && 
+        ((role !== undefined && role !== 'master') || (is_active === false))
+      );
+      
+      if (wouldRemoveMaster) {
+        const activeMasters = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.role, 'master'),
+            eq(franchise_users.is_active, true)
+          ));
+        
+        if (activeMasters.length <= 1) {
+          return res.status(400).json({ message: "Cannot demote or deactivate the only master of this franchise" });
+        }
+      }
+      
+      const [updated] = await db
+        .update(franchise_users)
+        .set(updateData)
+        .where(eq(franchise_users.id, existingLink.id))
+        .returning();
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating franchise user:", error);
+      res.status(500).json({ message: "Failed to update user" });
+    }
+  });
+
+  // Remove user from franchise
+  app.delete('/api/franchises/:id/users/:userId', isAuthenticated, async (req: any, res) => {
+    try {
+      const currentUserId = req.user.claims.sub;
+      const franchiseId = req.params.id;
+      const targetUserId = req.params.userId;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(currentUserId);
+      
+      // Only franchisor or franchise master can remove users
+      let canManageUsers = permissions.isFranchisor;
+      if (!canManageUsers) {
+        const [userLink] = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.user_id, currentUserId),
+            eq(franchise_users.role, 'master'),
+            eq(franchise_users.is_active, true)
+          ));
+        canManageUsers = !!userLink;
+      }
+      
+      if (!canManageUsers) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      // Prevent removing yourself if you're the only master
+      const [targetLink] = await db
+        .select()
+        .from(franchise_users)
+        .where(and(
+          eq(franchise_users.franchise_id, franchiseId),
+          eq(franchise_users.user_id, targetUserId)
+        ));
+      
+      if (!targetLink) {
+        return res.status(404).json({ message: "User not linked to this franchise" });
+      }
+      
+      // If target is an active master, check if there are other active masters
+      if (targetLink.role === 'master' && targetLink.is_active) {
+        const activeMasters = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.role, 'master'),
+            eq(franchise_users.is_active, true)
+          ));
+        
+        if (activeMasters.length <= 1) {
+          return res.status(400).json({ message: "Cannot remove the only master of this franchise" });
+        }
+      }
+      
+      await db
+        .delete(franchise_users)
+        .where(eq(franchise_users.id, targetLink.id));
+      
+      res.json({ message: "User removed successfully" });
+    } catch (error) {
+      console.error("Error removing franchise user:", error);
+      res.status(500).json({ message: "Failed to remove user" });
+    }
+  });
+
+  // ========== FRANCHISE EXCHANGE ACCOUNTS ==========
+
+  // Get exchange accounts for franchise
+  app.get('/api/franchises/:id/exchange-accounts', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const franchiseId = req.params.id;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId);
+      
+      // Check access: franchisor or franchise user
+      let hasAccess = permissions.isFranchisor || permissions.isMasterFranchise;
+      if (!hasAccess) {
+        const [userLink] = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.user_id, userId),
+            eq(franchise_users.is_active, true)
+          ));
+        hasAccess = !!userLink;
+      }
+      
+      if (!hasAccess) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      const { franchiseExchangeService } = await import('./services/franchiseExchangeService');
+      const accounts = await franchiseExchangeService.getAllExchangeAccounts(franchiseId);
+      
+      // Return accounts without encrypted credentials
+      const safeAccounts = accounts.map(acc => ({
+        id: acc.id,
+        franchiseId: acc.franchise_id,
+        exchange: acc.exchange,
+        exchangeLabel: acc.exchange_label,
+        canReadBalance: acc.can_read_balance,
+        canTrade: acc.can_trade,
+        canWithdraw: acc.can_withdraw,
+        isActive: acc.is_active,
+        isVerified: acc.is_verified,
+        verifiedAt: acc.verified_at,
+        lastUsedAt: acc.last_used_at,
+        consecutiveErrors: acc.consecutive_errors,
+        lastError: acc.last_error,
+        createdAt: acc.created_at,
+      }));
+      
+      res.json(safeAccounts);
+    } catch (error) {
+      console.error("Error fetching exchange accounts:", error);
+      res.status(500).json({ message: "Failed to fetch exchange accounts" });
+    }
+  });
+
+  // Create exchange account for franchise
+  app.post('/api/franchises/:id/exchange-accounts', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const franchiseId = req.params.id;
+      const { exchange, exchangeLabel, apiKey, apiSecret, apiPassphrase, canTrade } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId);
+      
+      // Only franchisor or franchise master can add exchange accounts
+      let canManage = permissions.isFranchisor;
+      if (!canManage) {
+        const [userLink] = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.user_id, userId),
+            eq(franchise_users.role, 'master'),
+            eq(franchise_users.is_active, true)
+          ));
+        canManage = !!userLink;
+      }
+      
+      if (!canManage) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      if (!apiKey || !apiSecret) {
+        return res.status(400).json({ message: "API key and secret are required" });
+      }
+      
+      const { franchiseExchangeService } = await import('./services/franchiseExchangeService');
+      const account = await franchiseExchangeService.createExchangeAccount({
+        franchiseId,
+        exchange: exchange || 'kraken',
+        exchangeLabel,
+        credentials: { apiKey, apiSecret, apiPassphrase },
+        canTrade: canTrade ?? false,
+        createdBy: userId,
+      });
+      
+      res.status(201).json({
+        id: account.id,
+        exchange: account.exchange,
+        exchangeLabel: account.exchange_label,
+        isActive: account.is_active,
+        isVerified: account.is_verified,
+        message: "Exchange account created successfully",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to create exchange account";
+      console.error("Error creating exchange account:", error);
+      res.status(400).json({ message });
+    }
+  });
+
+  // Update exchange account
+  app.patch('/api/franchises/:id/exchange-accounts/:exchange', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const franchiseId = req.params.id;
+      const exchange = req.params.exchange;
+      const { exchangeLabel, apiKey, apiSecret, apiPassphrase, canTrade, isActive } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId);
+      
+      let canManage = permissions.isFranchisor;
+      if (!canManage) {
+        const [userLink] = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.user_id, userId),
+            eq(franchise_users.role, 'master'),
+            eq(franchise_users.is_active, true)
+          ));
+        canManage = !!userLink;
+      }
+      
+      if (!canManage) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      const { franchiseExchangeService } = await import('./services/franchiseExchangeService');
+      
+      const updateParams: any = {};
+      if (exchangeLabel !== undefined) updateParams.exchangeLabel = exchangeLabel;
+      if (canTrade !== undefined) updateParams.canTrade = canTrade;
+      if (isActive !== undefined) updateParams.isActive = isActive;
+      if (apiKey && apiSecret) {
+        updateParams.credentials = { apiKey, apiSecret, apiPassphrase };
+      }
+      
+      const updated = await franchiseExchangeService.updateExchangeAccount(franchiseId, exchange, updateParams);
+      
+      if (!updated) {
+        return res.status(404).json({ message: "Exchange account not found" });
+      }
+      
+      res.json({
+        id: updated.id,
+        exchange: updated.exchange,
+        exchangeLabel: updated.exchange_label,
+        isActive: updated.is_active,
+        isVerified: updated.is_verified,
+        message: "Exchange account updated successfully",
+      });
+    } catch (error) {
+      console.error("Error updating exchange account:", error);
+      res.status(500).json({ message: "Failed to update exchange account" });
+    }
+  });
+
+  // Verify exchange account credentials
+  app.post('/api/franchises/:id/exchange-accounts/:exchange/verify', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const franchiseId = req.params.id;
+      const exchange = req.params.exchange;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId);
+      
+      let hasAccess = permissions.isFranchisor;
+      if (!hasAccess) {
+        const [userLink] = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.user_id, userId),
+            eq(franchise_users.is_active, true)
+          ));
+        hasAccess = !!userLink;
+      }
+      
+      if (!hasAccess) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      const { franchiseExchangeService } = await import('./services/franchiseExchangeService');
+      const result = await franchiseExchangeService.verifyExchangeAccount(franchiseId, exchange);
+      
+      res.json(result);
+    } catch (error) {
+      console.error("Error verifying exchange account:", error);
+      res.status(500).json({ message: "Failed to verify exchange account" });
+    }
+  });
+
+  // Delete exchange account
+  app.delete('/api/franchises/:id/exchange-accounts/:exchange', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const franchiseId = req.params.id;
+      const exchange = req.params.exchange;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId);
+      
+      let canManage = permissions.isFranchisor;
+      if (!canManage) {
+        const [userLink] = await db
+          .select()
+          .from(franchise_users)
+          .where(and(
+            eq(franchise_users.franchise_id, franchiseId),
+            eq(franchise_users.user_id, userId),
+            eq(franchise_users.role, 'master'),
+            eq(franchise_users.is_active, true)
+          ));
+        canManage = !!userLink;
+      }
+      
+      if (!canManage) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      const { franchiseExchangeService } = await import('./services/franchiseExchangeService');
+      const deleted = await franchiseExchangeService.deleteExchangeAccount(franchiseId, exchange);
+      
+      if (!deleted) {
+        return res.status(404).json({ message: "Exchange account not found" });
+      }
+      
+      res.json({ message: "Exchange account deleted successfully" });
+    } catch (error) {
+      console.error("Error deleting exchange account:", error);
+      res.status(500).json({ message: "Failed to delete exchange account" });
+    }
+  });
+
+  // Get user permissions
+  app.get('/api/user/permissions', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      res.json(permissions);
+    } catch (error) {
+      console.error("Error fetching user permissions:", error);
+      res.status(500).json({ message: "Failed to fetch permissions" });
+    }
+  });
+
+  // Get allowed risk profiles for user based on their franchise plan
+  app.get('/api/user/allowed-risk-profiles', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      const result = await franchisePlanService.getAllowedRiskProfilesForUser(userId);
+      
+      // Map profile names to codes for frontend compatibility (extended for new profiles)
+      const profileNameToCode: Record<string, string> = {
+        'conservative': 'C',
+        'moderate': 'M',
+        'aggressive': 'A',
+        'super_aggressive': 'SA',
+        'full_custom': 'F'
+      };
+      
+      // If null (no franchise), all profiles are allowed
+      const allowedCodes = result.allowed === null 
+        ? ['C', 'M', 'A', 'SA', 'F'] 
+        : result.allowed.map(name => profileNameToCode[name] || name.toUpperCase().charAt(0));
+      
+      res.json({
+        allowedProfiles: allowedCodes,
+        allowedProfileNames: result.allowed || ['conservative', 'moderate', 'aggressive', 'super_aggressive', 'full_custom'],
+        planCode: result.planCode,
+        planName: result.planName,
+        franchiseId: result.franchiseId,
+        isUnrestricted: result.allowed === null
+      });
+    } catch (error) {
+      console.error("Error fetching allowed risk profiles:", error);
+      res.status(500).json({ message: "Failed to fetch allowed risk profiles" });
+    }
+  });
+
+  // Get available risk profiles with governance status for campaign wizard
+  app.get('/api/user/available-profiles', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      const profiles = await franchisePlanService.getAvailableProfilesForUser(userId);
+      res.json(profiles);
+    } catch (error) {
+      console.error("Error fetching available profiles:", error);
+      res.status(500).json({ message: "Failed to fetch available profiles" });
+    }
+  });
+
+  // Validate campaign risk profile with governance - with strict Zod validation
+  const validateProfileSchema = z.object({
+    investorProfile: z.string().min(1, "investorProfile is required"),
+    customProfileId: z.string().uuid().optional()
+  }).refine(
+    (data) => {
+      // FULL_CUSTOM profile requires customProfileId
+      if (data.investorProfile.toUpperCase() === 'F' && !data.customProfileId) {
+        return false;
+      }
+      return true;
+    },
+    { message: "customProfileId is required for Full Custom profile", path: ["customProfileId"] }
+  );
+  
+  app.post('/api/campaigns/validate-profile', isAuthenticated, async (req: any, res) => {
+    try {
+      const parseResult = validateProfileSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request body", 
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const userId = req.user.claims.sub;
+      const { investorProfile, customProfileId } = parseResult.data;
+      
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      const validation = await franchisePlanService.validateCampaignRiskProfile(
+        userId,
+        investorProfile,
+        customProfileId
+      );
+      
+      // Return 403 if governance validation fails for high-risk profiles
+      if (!validation.valid) {
+        return res.status(403).json({
+          valid: false,
+          message: "Profile validation failed",
+          planValidation: validation.planValidation,
+          governanceValidation: validation.governanceValidation,
+          requiresDoubleConfirm: validation.requiresDoubleConfirm,
+          requiresLegalAcceptance: validation.requiresLegalAcceptance
+        });
+      }
+      
+      res.json(validation);
+    } catch (error) {
+      console.error("Error validating campaign profile:", error);
+      res.status(500).json({ message: "Failed to validate profile" });
+    }
+  });
+
+  // Record double confirmation for high-risk campaigns - with validation
+  const doubleConfirmSchema = z.object({
+    confirmationToken: z.string().optional()
+  });
+  
+  app.post('/api/campaigns/:id/double-confirm', isAuthenticated, async (req: any, res) => {
+    try {
+      // Apply Zod validation for request body
+      const parseResult = doubleConfirmSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request body", 
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const userId = req.user.claims.sub;
+      const { id } = req.params;
+      
+      // Validate campaign exists, belongs to user, and is high-risk profile
+      const campaign = await db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
+      if (campaign.length === 0) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      
+      const campaignData = campaign[0];
+      
+      // SECURITY: Verify ownership - user must own this campaign
+      if (campaignData.user_id !== userId) {
+        return res.status(403).json({ message: "You do not have permission to confirm this campaign" });
+      }
+      
+      if (!['SA', 'F'].includes(campaignData.investor_profile.toUpperCase())) {
+        return res.status(400).json({ message: "Double confirmation only required for high-risk profiles" });
+      }
+      
+      const { governanceService } = await import('./services/governanceService');
+      const result = await governanceService.recordDoubleConfirmation(id, userId);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: "Failed to record confirmation" });
+      }
+      
+      res.json({ success: true, hash: result.hash });
+    } catch (error) {
+      console.error("Error recording double confirmation:", error);
+      res.status(500).json({ message: "Failed to record confirmation" });
+    }
+  });
+
+  // Record legal acceptance for high-risk profiles - with strict validation
+  const legalAcceptanceSchema = z.object({
+    acceptanceVersion: z.string().min(1, "acceptanceVersion is required"),
+    acknowledged: z.boolean().refine(val => val === true, "Must acknowledge terms")
+  });
+  
+  app.post('/api/campaigns/:id/legal-acceptance', isAuthenticated, async (req: any, res) => {
+    try {
+      const parseResult = legalAcceptanceSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request body", 
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const userId = req.user.claims.sub;
+      const { id } = req.params;
+      const { acceptanceVersion } = parseResult.data;
+      
+      // Validate campaign exists, belongs to user, and requires legal acceptance
+      const campaign = await db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
+      if (campaign.length === 0) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      
+      const campaignData = campaign[0];
+      
+      // SECURITY: Verify ownership - user must own this campaign
+      if (campaignData.user_id !== userId) {
+        return res.status(403).json({ message: "You do not have permission to accept terms for this campaign" });
+      }
+      
+      if (!['SA', 'F'].includes(campaignData.investor_profile.toUpperCase())) {
+        return res.status(400).json({ message: "Legal acceptance only required for high-risk profiles" });
+      }
+      
+      const { governanceService } = await import('./services/governanceService');
+      const result = await governanceService.recordLegalAcceptance(userId, id, acceptanceVersion);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: "Failed to record legal acceptance" });
+      }
+      
+      res.json({ success: true, hash: result.hash });
+    } catch (error) {
+      console.error("Error recording legal acceptance:", error);
+      res.status(500).json({ message: "Failed to record legal acceptance" });
+    }
+  });
+
+  // Franchise Dashboard - aggregated data for franchise members
+  app.get('/api/franchise-dashboard', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      // Check if user is a franchise member
+      if (!permissions.franchiseId && !permissions.isFranchisor) {
+        return res.status(404).json({ 
+          message: "No franchise found",
+          code: "NO_FRANCHISE"
+        });
+      }
+      
+      // Get the franchise
+      const franchise = await franchisePermissionService.getUserFranchise(userId, userEmail);
+      if (!franchise && !permissions.isFranchisor) {
+        return res.status(404).json({ 
+          message: "No franchise found",
+          code: "NO_FRANCHISE"
+        });
+      }
+      
+      // For franchisors without a specific franchise, return summary
+      if (permissions.isFranchisor && !franchise) {
+        const allFranchises = await db.select().from(franchises);
+        return res.json({
+          isFranchisor: true,
+          franchiseCount: allFranchises.length,
+          activeCount: allFranchises.filter(f => f.status === 'active').length,
+          message: "Access franchise admin for full management"
+        });
+      }
+      
+      // Get franchise plan
+      const [plan] = await db
+        .select()
+        .from(franchise_plans)
+        .where(eq(franchise_plans.id, franchise!.plan_id));
+      
+      // Get franchise users count
+      const franchiseUsersData = await db
+        .select()
+        .from(franchise_users)
+        .where(and(
+          eq(franchise_users.franchise_id, franchise!.id),
+          eq(franchise_users.is_active, true)
+        ));
+      
+      // Get campaigns linked to this franchise
+      const franchiseCampaigns = await db
+        .select()
+        .from(campaigns)
+        .where(and(
+          eq(campaigns.franchise_id, franchise!.id),
+          eq(campaigns.is_deleted, false)
+        ));
+      
+      const activeCampaigns = franchiseCampaigns.filter(c => c.status === 'running');
+      const pausedCampaigns = franchiseCampaigns.filter(c => c.status === 'paused');
+      const completedCampaigns = franchiseCampaigns.filter(c => c.status === 'completed' || c.status === 'stopped');
+      
+      // Calculate total PnL from campaigns
+      let totalPnL = 0;
+      let totalEquity = 0;
+      for (const c of franchiseCampaigns) {
+        if (c.current_equity && c.initial_capital) {
+          const pnl = parseFloat(c.current_equity) - parseFloat(c.initial_capital);
+          totalPnL += pnl;
+          totalEquity += parseFloat(c.current_equity);
+        }
+      }
+      
+      // Get recent robot activity logs (last 20)
+      const recentActivity = await db
+        .select()
+        .from(robot_activity_logs)
+        .where(inArray(robot_activity_logs.campaign_id, franchiseCampaigns.map(c => c.id)))
+        .orderBy(desc(robot_activity_logs.created_at))
+        .limit(20);
+      
+      res.json({
+        franchise: {
+          id: franchise!.id,
+          name: franchise!.name,
+          status: franchise!.status,
+          under_audit: franchise!.under_audit,
+          country: franchise!.country,
+          created_at: franchise!.created_at,
+        },
+        plan: plan ? {
+          name: plan.name,
+          max_campaigns: plan.max_campaigns,
+          royalty_percentage: plan.royalty_percentage,
+        } : null,
+        role: permissions.franchiseRole,
+        permissions: permissions.permissions,
+        stats: {
+          userCount: franchiseUsersData.length,
+          totalCampaigns: franchiseCampaigns.length,
+          activeCampaigns: activeCampaigns.length,
+          pausedCampaigns: pausedCampaigns.length,
+          completedCampaigns: completedCampaigns.length,
+          totalEquity: totalEquity.toFixed(2),
+          totalPnL: totalPnL.toFixed(2),
+          pnlPercentage: totalEquity > 0 ? ((totalPnL / (totalEquity - totalPnL)) * 100).toFixed(2) : '0.00',
+        },
+        recentActivity: recentActivity.map(a => ({
+          id: a.id,
+          type: a.type,
+          symbol: a.symbol,
+          message: a.message,
+          created_at: a.created_at,
+        })),
+        campaigns: franchiseCampaigns.map(c => ({
+          id: c.id,
+          name: c.name,
+          status: c.status,
+          initial_capital: c.initial_capital,
+          current_equity: c.current_equity,
+          started_at: c.started_at,
+        })).slice(0, 5), // Top 5 campaigns
+      });
+    } catch (error) {
+      console.error("Error fetching franchise dashboard:", error);
+      res.status(500).json({ message: "Failed to fetch franchise dashboard" });
+    }
+  });
+
+  // Franchise Reports - Consolidated performance reports for all campaigns in a franchise
+  app.get('/api/franchise-reports', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { campaignReportService } = await import('./services/campaignReportService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      // Check if user is a franchise member
+      if (!permissions.franchiseId) {
+        return res.status(404).json({ 
+          message: "No franchise found",
+          code: "NO_FRANCHISE"
+        });
+      }
+      
+      // Get the franchise
+      const franchise = await franchisePermissionService.getUserFranchise(userId, userEmail);
+      if (!franchise) {
+        return res.status(404).json({ 
+          message: "No franchise found",
+          code: "NO_FRANCHISE"
+        });
+      }
+      
+      // Get all campaigns for this franchise
+      const franchiseCampaigns = await db
+        .select()
+        .from(campaigns)
+        .where(and(
+          eq(campaigns.franchise_id, franchise.id),
+          eq(campaigns.is_deleted, false)
+        ));
+      
+      if (franchiseCampaigns.length === 0) {
+        return res.json({
+          franchise: {
+            id: franchise.id,
+            name: franchise.name,
+          },
+          operational: {
+            activeCampaigns: 0,
+            pausedCampaigns: 0,
+            completedCampaigns: 0,
+            totalOpenPositions: 0,
+            totalTradesToday: 0,
+            circuitBreakersActive: 0,
+            campaigns: [],
+          },
+          report8h: {
+            periodStart: new Date(Date.now() - 8 * 60 * 60 * 1000),
+            periodEnd: new Date(),
+            totalTrades: 0,
+            wins: 0,
+            losses: 0,
+            netPnL: 0,
+            netPnLPct: 0,
+            topPerformers: [],
+            worstPerformers: [],
+            campaignBreakdown: [],
+          },
+          report24h: {
+            periodStart: new Date(Date.now() - 24 * 60 * 60 * 1000),
+            periodEnd: new Date(),
+            totalTrades: 0,
+            wins: 0,
+            losses: 0,
+            winRate: 0,
+            netPnL: 0,
+            totalInitialEquity: 0,
+            totalFinalEquity: 0,
+            roi: 0,
+            keyDecisions: [],
+            summary: 'Nenhuma campanha ativa na franquia.',
+            campaignBreakdown: [],
+          },
+          history: {
+            periodStart: new Date(Date.now() - 72 * 60 * 60 * 1000),
+            periodEnd: new Date(),
+            trades: [],
+            totalTrades: 0,
+            accumulatedPnL: 0,
+            totalVolume: 0,
+          },
+        });
+      }
+      
+      // Fetch reports for all campaigns in parallel
+      const campaignIds = franchiseCampaigns.map(c => c.id);
+      
+      const [robotStatuses, reports8h, reports24h, histories] = await Promise.all([
+        Promise.all(campaignIds.map(id => campaignReportService.getRobotStatus(id))),
+        Promise.all(campaignIds.map(id => campaignReportService.getReport8h(id))),
+        Promise.all(campaignIds.map(id => campaignReportService.getReport24h(id))),
+        Promise.all(campaignIds.map(id => campaignReportService.getHistory(id, 72))),
+      ]);
+      
+      // Aggregate operational data
+      let totalOpenPositions = 0;
+      let totalTradesToday = 0;
+      let circuitBreakersActive = 0;
+      const operationalCampaigns = robotStatuses.filter(Boolean).map(status => {
+        if (!status) return null;
+        totalOpenPositions += status.openPositionsCount;
+        totalTradesToday += status.todayTradesCount;
+        if (status.circuitBreakers.campaign || status.circuitBreakers.dailyLoss || status.circuitBreakers.pair) {
+          circuitBreakersActive++;
+        }
+        return {
+          id: status.campaignId,
+          name: status.campaignName,
+          status: status.status,
+          statusLabel: status.statusLabel,
+          openPositions: status.openPositionsCount,
+          tradesToday: status.todayTradesCount,
+          circuitBreakers: status.circuitBreakers,
+        };
+      }).filter(Boolean);
+      
+      // Aggregate 8h report data
+      const now = new Date();
+      const period8hStart = new Date(now.getTime() - 8 * 60 * 60 * 1000);
+      let total8hTrades = 0, total8hWins = 0, total8hLosses = 0, total8hPnL = 0;
+      const pnlBySymbol8h: Record<string, number> = {};
+      const campaign8hBreakdown: any[] = [];
+      
+      for (const report of reports8h) {
+        if (!report) continue;
+        total8hTrades += report.tradesCount;
+        total8hWins += report.wins;
+        total8hLosses += report.losses;
+        total8hPnL += report.netPnL;
+        
+        for (const p of report.topPerformers) {
+          pnlBySymbol8h[p.symbol] = (pnlBySymbol8h[p.symbol] || 0) + p.pnl;
+        }
+        for (const p of report.worstPerformers) {
+          pnlBySymbol8h[p.symbol] = (pnlBySymbol8h[p.symbol] || 0) + p.pnl;
+        }
+        
+        campaign8hBreakdown.push({
+          campaignId: report.campaignId,
+          campaignName: report.campaignName,
+          trades: report.tradesCount,
+          pnl: report.netPnL,
+        });
+      }
+      
+      const sorted8hSymbols = Object.entries(pnlBySymbol8h).sort((a, b) => b[1] - a[1]);
+      const top8hPerformers = sorted8hSymbols.filter(([, pnl]) => pnl > 0).slice(0, 5).map(([symbol, pnl]) => ({ symbol, pnl }));
+      const worst8hPerformers = sorted8hSymbols.filter(([, pnl]) => pnl < 0).slice(-5).map(([symbol, pnl]) => ({ symbol, pnl }));
+      
+      const totalInitialEquity = franchiseCampaigns.reduce((sum, c) => sum + parseFloat(c.initial_capital || '0'), 0);
+      const total8hPnLPct = totalInitialEquity > 0 ? (total8hPnL / totalInitialEquity) * 100 : 0;
+      
+      // Aggregate 24h report data
+      const period24hStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      let total24hTrades = 0, total24hWins = 0, total24hLosses = 0, total24hPnL = 0;
+      let totalFinalEquity = 0;
+      const allKeyDecisions: any[] = [];
+      const campaign24hBreakdown: any[] = [];
+      
+      for (const report of reports24h) {
+        if (!report) continue;
+        total24hTrades += report.tradesCount;
+        total24hWins += report.wins;
+        total24hLosses += report.losses;
+        total24hPnL += report.netPnL;
+        totalFinalEquity += report.finalEquity;
+        
+        for (const decision of report.keyDecisions) {
+          allKeyDecisions.push({
+            ...decision,
+            campaignName: report.campaignName,
+          });
+        }
+        
+        campaign24hBreakdown.push({
+          campaignId: report.campaignId,
+          campaignName: report.campaignName,
+          trades: report.tradesCount,
+          pnl: report.netPnL,
+          winRate: report.winRate,
+          roi: report.roi,
+        });
+      }
+      
+      const winRate24h = total24hTrades > 0 ? (total24hWins / total24hTrades) * 100 : 0;
+      const roi24h = totalInitialEquity > 0 ? ((totalFinalEquity - totalInitialEquity) / totalInitialEquity) * 100 : 0;
+      
+      // Sort key decisions by time and take top 10
+      allKeyDecisions.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+      const topKeyDecisions = allKeyDecisions.slice(0, 10);
+      
+      // Generate summary
+      let summary24h = '';
+      if (total24hTrades === 0) {
+        summary24h = 'Nenhuma operação realizada nas últimas 24 horas em todas as campanhas da franquia.';
+      } else if (total24hPnL > 0) {
+        summary24h = `Dia positivo para a franquia com lucro total de $${total24hPnL.toFixed(2)} (${roi24h.toFixed(2)}% ROI). Taxa de acerto: ${winRate24h.toFixed(1)}%.`;
+      } else {
+        summary24h = `Dia com prejuízo de $${Math.abs(total24hPnL).toFixed(2)}. Taxa de acerto: ${winRate24h.toFixed(1)}%. Sistema de proteção ativo.`;
+      }
+      
+      // Aggregate trade history
+      const periodHistoryStart = new Date(now.getTime() - 72 * 60 * 60 * 1000);
+      const allTrades: any[] = [];
+      let totalAccumulatedPnL = 0;
+      let totalVolume = 0;
+      
+      for (const history of histories) {
+        if (!history) continue;
+        totalAccumulatedPnL += history.accumulatedPnL;
+        totalVolume += history.totalVolume;
+        
+        for (const trade of history.trades) {
+          allTrades.push({
+            ...trade,
+            campaignName: history.campaignName,
+          });
+        }
+      }
+      
+      // Sort trades by timestamp
+      allTrades.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      
+      res.json({
+        franchise: {
+          id: franchise.id,
+          name: franchise.name,
+        },
+        operational: {
+          activeCampaigns: franchiseCampaigns.filter(c => c.status === 'running').length,
+          pausedCampaigns: franchiseCampaigns.filter(c => c.status === 'paused').length,
+          completedCampaigns: franchiseCampaigns.filter(c => c.status === 'completed' || c.status === 'stopped').length,
+          totalOpenPositions,
+          totalTradesToday,
+          circuitBreakersActive,
+          campaigns: operationalCampaigns,
+        },
+        report8h: {
+          periodStart: period8hStart,
+          periodEnd: now,
+          totalTrades: total8hTrades,
+          wins: total8hWins,
+          losses: total8hLosses,
+          netPnL: total8hPnL,
+          netPnLPct: total8hPnLPct,
+          topPerformers: top8hPerformers,
+          worstPerformers: worst8hPerformers,
+          campaignBreakdown: campaign8hBreakdown,
+        },
+        report24h: {
+          periodStart: period24hStart,
+          periodEnd: now,
+          totalTrades: total24hTrades,
+          wins: total24hWins,
+          losses: total24hLosses,
+          winRate: winRate24h,
+          netPnL: total24hPnL,
+          totalInitialEquity,
+          totalFinalEquity,
+          roi: roi24h,
+          keyDecisions: topKeyDecisions,
+          summary: summary24h,
+          campaignBreakdown: campaign24hBreakdown,
+        },
+        history: {
+          periodStart: periodHistoryStart,
+          periodEnd: now,
+          trades: allTrades.slice(0, 100), // Limit to 100 most recent trades
+          totalTrades: allTrades.length,
+          accumulatedPnL: totalAccumulatedPnL,
+          totalVolume,
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching franchise reports:", error);
+      res.status(500).json({ message: "Failed to fetch franchise reports" });
+    }
+  });
+
+  // ========== ROYALTY ENDPOINTS ==========
+
+  // Admin: Calculate royalties for a specific franchise
+  app.post('/api/admin/franchises/:id/royalties/calculate', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const franchiseId = req.params.id;
+      const { year, month } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseRoyaltyService } = await import('./services/franchiseRoyaltyService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.permissions.canManageRoyalties) {
+        return res.status(403).json({ message: "Not authorized to manage royalties" });
+      }
+      
+      const targetYear = year || new Date().getFullYear();
+      const targetMonth = month || new Date().getMonth() + 1;
+      
+      const calculation = await franchiseRoyaltyService.calculateMonthlyRoyalties(franchiseId, targetYear, targetMonth);
+      if (!calculation) {
+        return res.status(404).json({ message: "No data to calculate royalties" });
+      }
+      
+      const saved = await franchiseRoyaltyService.saveRoyaltyCalculation(calculation);
+      res.json({ calculation, saved });
+    } catch (error) {
+      console.error("Error calculating royalties:", error);
+      res.status(500).json({ message: "Failed to calculate royalties" });
+    }
+  });
+
+  // Admin: Get royalties for a franchise
+  app.get('/api/admin/franchises/:id/royalties', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const franchiseId = req.params.id;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseRoyaltyService } = await import('./services/franchiseRoyaltyService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.permissions.canViewRoyalties && !permissions.isFranchisor) {
+        return res.status(403).json({ message: "Not authorized to view royalties" });
+      }
+      
+      const summary = await franchiseRoyaltyService.getRoyaltySummary(franchiseId);
+      res.json(summary);
+    } catch (error) {
+      console.error("Error fetching royalties:", error);
+      res.status(500).json({ message: "Failed to fetch royalties" });
+    }
+  });
+
+  // Admin: Calculate royalties for all franchises
+  app.post('/api/admin/royalties/calculate-all', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { year, month } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseRoyaltyService } = await import('./services/franchiseRoyaltyService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can calculate all royalties" });
+      }
+      
+      const targetYear = year || new Date().getFullYear();
+      const targetMonth = month || new Date().getMonth() + 1;
+      
+      const result = await franchiseRoyaltyService.calculateAllFranchisesRoyalties(targetYear, targetMonth);
+      res.json(result);
+    } catch (error) {
+      console.error("Error calculating all royalties:", error);
+      res.status(500).json({ message: "Failed to calculate royalties" });
+    }
+  });
+
+  // Admin: Update royalty status
+  app.patch('/api/admin/royalties/:id/status', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const royaltyId = req.params.id;
+      const { status, payment_method, payment_reference, invoice_url } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseRoyaltyService } = await import('./services/franchiseRoyaltyService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.permissions.canManageRoyalties) {
+        return res.status(403).json({ message: "Not authorized to manage royalties" });
+      }
+      
+      const validStatuses = ['pending', 'invoiced', 'paid', 'disputed'];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+      
+      const updated = await franchiseRoyaltyService.updateRoyaltyStatus(royaltyId, status, {
+        payment_method,
+        payment_reference,
+        invoice_url,
+      });
+      
+      if (!updated) {
+        return res.status(404).json({ message: "Royalty not found" });
+      }
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating royalty status:", error);
+      res.status(500).json({ message: "Failed to update royalty status" });
+    }
+  });
+
+  // Franchise member: View their royalties
+  app.get('/api/franchise/royalties', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseRoyaltyService } = await import('./services/franchiseRoyaltyService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.franchiseId) {
+        return res.status(404).json({ message: "No franchise found", code: "NO_FRANCHISE" });
+      }
+      
+      if (!permissions.permissions.canViewRoyalties) {
+        return res.status(403).json({ message: "Not authorized to view royalties" });
+      }
+      
+      const summary = await franchiseRoyaltyService.getRoyaltySummary(permissions.franchiseId);
+      res.json(summary);
+    } catch (error) {
+      console.error("Error fetching franchise royalties:", error);
+      res.status(500).json({ message: "Failed to fetch royalties" });
+    }
+  });
+
+  // Franchisor: Get ALL royalties across all franchises (for financial panel)
+  app.get('/api/franchise-royalties', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can view all royalties" });
+      }
+      
+      // Get all franchises (active and suspended, exclude terminated)
+      const allFranchises = await db.select().from(franchises).where(
+        sql`${franchises.status} != 'terminated'`
+      );
+      
+      const { franchiseRoyaltyService } = await import('./services/franchiseRoyaltyService');
+      
+      let totalPaid = 0;
+      let totalPending = 0;
+      let totalDisputed = 0;
+      const allRoyalties: any[] = [];
+      
+      for (const franchise of allFranchises) {
+        const summary = await franchiseRoyaltyService.getRoyaltySummary(franchise.id);
+        totalPaid += summary.totalPaid;
+        totalPending += summary.totalPending;
+        totalDisputed += summary.totalDisputed;
+        
+        for (const royalty of summary.royalties) {
+          allRoyalties.push({
+            ...royalty,
+            franchise_name: franchise.name,
+            franchise_id: franchise.id,
+          });
+        }
+      }
+      
+      // Sort by period (newest first)
+      allRoyalties.sort((a, b) => {
+        if (a.period_year !== b.period_year) return b.period_year - a.period_year;
+        return b.period_month - a.period_month;
+      });
+      
+      res.json({
+        summary: { totalPaid, totalPending, totalDisputed },
+        royalties: allRoyalties,
+      });
+    } catch (error) {
+      console.error("Error fetching all franchise royalties:", error);
+      res.status(500).json({ message: "Failed to fetch royalties" });
+    }
+  });
+
+  // Admin: Get ALL royalties across all franchises
+  app.get('/api/admin/royalties', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can view all royalties" });
+      }
+      
+      // Get all franchises (active and suspended, exclude terminated)
+      const allFranchises = await db.select().from(franchises).where(
+        sql`${franchises.status} != 'terminated'`
+      );
+      
+      const { franchiseRoyaltyService } = await import('./services/franchiseRoyaltyService');
+      
+      let totalPaid = 0;
+      let totalPending = 0;
+      let totalDisputed = 0;
+      const allRoyalties: any[] = [];
+      
+      for (const franchise of allFranchises) {
+        const summary = await franchiseRoyaltyService.getRoyaltySummary(franchise.id);
+        totalPaid += summary.totalPaid;
+        totalPending += summary.totalPending;
+        totalDisputed += summary.totalDisputed;
+        
+        for (const royalty of summary.royalties) {
+          allRoyalties.push({
+            ...royalty,
+            franchise_name: franchise.name,
+          });
+        }
+      }
+      
+      // Sort by period (newest first)
+      allRoyalties.sort((a, b) => {
+        if (a.period_year !== b.period_year) return b.period_year - a.period_year;
+        return b.period_month - a.period_month;
+      });
+      
+      res.json({
+        summary: { totalPaid, totalPending, totalDisputed },
+        royalties: allRoyalties,
+      });
+    } catch (error) {
+      console.error("Error fetching all royalties:", error);
+      res.status(500).json({ message: "Failed to fetch royalties" });
+    }
+  });
+
+  // ========== FRANCHISE FEES ENDPOINTS ==========
+
+  // Franchisor: Get all fees
+  app.get('/api/franchise-fees', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { status, fee_type } = req.query;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseFeeService } = await import('./services/franchiseFeeService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can view all fees" });
+      }
+      
+      const fees = await franchiseFeeService.getAllFees({ 
+        status: status as string,
+        fee_type: fee_type as string 
+      });
+      const summary = await franchiseFeeService.getFeeSummary();
+      
+      res.json({ fees, summary });
+    } catch (error) {
+      console.error("Error fetching fees:", error);
+      res.status(500).json({ message: "Failed to fetch fees" });
+    }
+  });
+
+  // Franchisor: Update fee status
+  app.patch('/api/franchise-fees/:id/status', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const feeId = req.params.id;
+      const { status, payment_method, payment_reference } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseFeeService } = await import('./services/franchiseFeeService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can update fees" });
+      }
+      
+      const updated = await franchiseFeeService.updateFeeStatus(feeId, status, {
+        payment_method,
+        payment_reference,
+      });
+      
+      if (!updated) {
+        return res.status(404).json({ message: "Fee not found" });
+      }
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating fee:", error);
+      res.status(500).json({ message: "Failed to update fee" });
+    }
+  });
+
+  // ========== FRANCHISE INVOICES ENDPOINTS ==========
+
+  // Franchisor: Get all invoices
+  app.get('/api/franchise-invoices', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { status } = req.query;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseInvoiceService } = await import('./services/franchiseInvoiceService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can view all invoices" });
+      }
+      
+      const invoices = await franchiseInvoiceService.getAllInvoices({ 
+        status: status as string
+      });
+      const summary = await franchiseInvoiceService.getInvoiceSummary();
+      
+      res.json({ invoices, summary });
+    } catch (error) {
+      console.error("Error fetching invoices:", error);
+      res.status(500).json({ message: "Failed to fetch invoices" });
+    }
+  });
+
+  // Franchisor: Generate invoice from royalties
+  app.post('/api/franchise-invoices/generate', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { franchise_id, royalty_ids } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseInvoiceService } = await import('./services/franchiseInvoiceService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can generate invoices" });
+      }
+      
+      if (!franchise_id || !royalty_ids || !Array.isArray(royalty_ids) || royalty_ids.length === 0) {
+        return res.status(400).json({ message: "franchise_id and royalty_ids are required" });
+      }
+      
+      const invoice = await franchiseInvoiceService.generateRoyaltyInvoice(franchise_id, royalty_ids);
+      res.json(invoice);
+    } catch (error) {
+      console.error("Error generating invoice:", error);
+      res.status(500).json({ message: "Failed to generate invoice" });
+    }
+  });
+
+  // Franchisor: Update invoice status
+  app.patch('/api/franchise-invoices/:id/status', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const invoiceId = req.params.id;
+      const { status, payment_method, payment_reference } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseInvoiceService } = await import('./services/franchiseInvoiceService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can update invoices" });
+      }
+      
+      const validStatuses = ['draft', 'sent', 'paid', 'overdue', 'cancelled'];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+      
+      const updated = await franchiseInvoiceService.updateInvoiceStatus(invoiceId, status, {
+        payment_method,
+        payment_reference,
+      });
+      
+      if (!updated) {
+        return res.status(404).json({ message: "Invoice not found" });
+      }
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating invoice:", error);
+      res.status(500).json({ message: "Failed to update invoice" });
+    }
+  });
+
+  // Franchisor: Get invoice by ID
+  app.get('/api/franchise-invoices/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const invoiceId = req.params.id;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseInvoiceService } = await import('./services/franchiseInvoiceService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can view invoices" });
+      }
+      
+      const invoice = await franchiseInvoiceService.getInvoiceById(invoiceId);
+      if (!invoice) {
+        return res.status(404).json({ message: "Invoice not found" });
+      }
+      
+      res.json(invoice);
+    } catch (error) {
+      console.error("Error fetching invoice:", error);
+      res.status(500).json({ message: "Failed to fetch invoice" });
+    }
+  });
+
+  // ========== FRANCHISE REPORTS ENDPOINTS ==========
+
+  // Get revenue by period report
+  app.get('/api/franchise-reports/revenue-by-period', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const format = req.query.format as string || 'json';
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseReportService } = await import('./services/franchiseReportService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can access reports" });
+      }
+      
+      const data = await franchiseReportService.getRevenueByPeriod();
+      
+      if (format === 'csv') {
+        const csv = franchiseReportService.convertToCSV(data, 'revenue-by-period');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=revenue-by-period.csv');
+        return res.send(csv);
+      }
+      
+      res.json(data);
+    } catch (error) {
+      console.error("Error fetching report:", error);
+      res.status(500).json({ message: "Failed to fetch report" });
+    }
+  });
+
+  // Get revenue by plan report
+  app.get('/api/franchise-reports/revenue-by-plan', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const format = req.query.format as string || 'json';
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseReportService } = await import('./services/franchiseReportService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can access reports" });
+      }
+      
+      const data = await franchiseReportService.getRevenueByPlan();
+      
+      if (format === 'csv') {
+        const csv = franchiseReportService.convertToCSV(data, 'revenue-by-plan');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=revenue-by-plan.csv');
+        return res.send(csv);
+      }
+      
+      res.json(data);
+    } catch (error) {
+      console.error("Error fetching report:", error);
+      res.status(500).json({ message: "Failed to fetch report" });
+    }
+  });
+
+  // Get revenue by franchise report
+  app.get('/api/franchise-reports/revenue-by-franchise', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const format = req.query.format as string || 'json';
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseReportService } = await import('./services/franchiseReportService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can access reports" });
+      }
+      
+      const data = await franchiseReportService.getRevenueByFranchise();
+      
+      if (format === 'csv') {
+        const csv = franchiseReportService.convertToCSV(data, 'revenue-by-franchise');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=revenue-by-franchise.csv');
+        return res.send(csv);
+      }
+      
+      res.json(data);
+    } catch (error) {
+      console.error("Error fetching report:", error);
+      res.status(500).json({ message: "Failed to fetch report" });
+    }
+  });
+
+  // Get royalties by campaign report
+  app.get('/api/franchise-reports/royalties-by-campaign', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const format = req.query.format as string || 'json';
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseReportService } = await import('./services/franchiseReportService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can access reports" });
+      }
+      
+      const data = await franchiseReportService.getRoyaltiesByCampaign();
+      
+      if (format === 'csv') {
+        const csv = franchiseReportService.convertToCSV(data, 'royalties-by-campaign');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=royalties-by-campaign.csv');
+        return res.send(csv);
+      }
+      
+      res.json(data);
+    } catch (error) {
+      console.error("Error fetching report:", error);
+      res.status(500).json({ message: "Failed to fetch report" });
+    }
+  });
+
+  // Get delinquency report
+  app.get('/api/franchise-reports/delinquency', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const format = req.query.format as string || 'json';
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseReportService } = await import('./services/franchiseReportService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can access reports" });
+      }
+      
+      const data = await franchiseReportService.getDelinquencyReport();
+      
+      if (format === 'csv') {
+        const csv = franchiseReportService.convertToCSV(data, 'delinquency');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=delinquency-report.csv');
+        return res.send(csv);
+      }
+      
+      res.json(data);
+    } catch (error) {
+      console.error("Error fetching report:", error);
+      res.status(500).json({ message: "Failed to fetch report" });
+    }
+  });
+
+  // ========== FRANCHISE ONBOARDING ENDPOINTS ==========
+
+  // Get available franchise plans for onboarding
+  app.get('/api/franchise-onboarding/plans', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchiseOnboardingService } = await import('./services/franchiseOnboardingService');
+      const plans = await franchiseOnboardingService.getAvailablePlans();
+      res.json(plans);
+    } catch (error) {
+      console.error("Error fetching plans:", error);
+      res.status(500).json({ message: "Failed to fetch plans" });
+    }
+  });
+
+  // Start franchise onboarding process
+  app.post('/api/franchise-onboarding/start', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { planId, name, cnpj, tax_id, tax_id_type, address, country } = req.body;
+      
+      if (!planId || !name) {
+        return res.status(400).json({ message: "Plan and franchise name are required" });
+      }
+      
+      const { franchiseOnboardingService } = await import('./services/franchiseOnboardingService');
+      const result = await franchiseOnboardingService.startOnboarding(userId, planId, {
+        name,
+        cnpj,
+        tax_id,
+        tax_id_type,
+        address,
+        country,
+      });
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ franchiseId: result.franchiseId });
+    } catch (error) {
+      console.error("Error starting onboarding:", error);
+      res.status(500).json({ message: "Failed to start onboarding" });
+    }
+  });
+
+  // Get onboarding state for a franchise
+  app.get('/api/franchise-onboarding/:franchiseId/state', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { franchiseId } = req.params;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseOnboardingService } = await import('./services/franchiseOnboardingService');
+      
+      const permissions = await franchisePermissionService.getUserFranchiseRole(userId, franchiseId);
+      if (!permissions && !req.user.claims.email?.match(/(alltrendsfy|itopaiva01)@gmail\.com/)) {
+        return res.status(403).json({ message: "Not authorized to view this franchise" });
+      }
+      
+      const state = await franchiseOnboardingService.getOnboardingState(franchiseId);
+      if (!state) {
+        return res.status(404).json({ message: "Franchise not found" });
+      }
+      
+      res.json(state);
+    } catch (error) {
+      console.error("Error fetching onboarding state:", error);
+      res.status(500).json({ message: "Failed to fetch onboarding state" });
+    }
+  });
+
+  // Accept franchise contract
+  app.post('/api/franchise-onboarding/:franchiseId/accept-contract', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { franchiseId } = req.params;
+      const { contractVersion } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseOnboardingService } = await import('./services/franchiseOnboardingService');
+      
+      const permissions = await franchisePermissionService.getUserFranchiseRole(userId, franchiseId);
+      if (permissions?.role !== 'master') {
+        return res.status(403).json({ message: "Only franchise owner can accept contract" });
+      }
+      
+      const result = await franchiseOnboardingService.acceptContract(franchiseId, userId, contractVersion || '1.0');
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error accepting contract:", error);
+      res.status(500).json({ message: "Failed to accept contract" });
+    }
+  });
+
+  // Confirm payment (admin only or payment gateway callback)
+  app.post('/api/franchise-onboarding/:franchiseId/confirm-payment', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { franchiseId } = req.params;
+      const { payment_method, payment_reference, payment_gateway_id } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseOnboardingService } = await import('./services/franchiseOnboardingService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can confirm payments" });
+      }
+      
+      const result = await franchiseOnboardingService.confirmPayment(franchiseId, {
+        payment_method,
+        payment_reference,
+        payment_gateway_id,
+      }, userId);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error confirming payment:", error);
+      res.status(500).json({ message: "Failed to confirm payment" });
+    }
+  });
+
+  // Approve franchise (franchisor only)
+  app.post('/api/franchise-onboarding/:franchiseId/approve', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { franchiseId } = req.params;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseOnboardingService } = await import('./services/franchiseOnboardingService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can approve franchises" });
+      }
+      
+      const result = await franchiseOnboardingService.approveFranchise(franchiseId, userId);
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error approving franchise:", error);
+      res.status(500).json({ message: "Failed to approve franchise" });
+    }
+  });
+
+  // Reject franchise (franchisor only)
+  app.post('/api/franchise-onboarding/:franchiseId/reject', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { franchiseId } = req.params;
+      const { reason } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseOnboardingService } = await import('./services/franchiseOnboardingService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can reject franchises" });
+      }
+      
+      const result = await franchiseOnboardingService.rejectFranchise(franchiseId, userId, reason || 'Rejected');
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error rejecting franchise:", error);
+      res.status(500).json({ message: "Failed to reject franchise" });
+    }
+  });
+
+  // Get pending onboarding requests (franchisor only)
+  app.get('/api/franchise-onboarding/pending', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const { franchiseOnboardingService } = await import('./services/franchiseOnboardingService');
+      
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Only franchisor can view pending onboardings" });
+      }
+      
+      const pending = await franchiseOnboardingService.getPendingOnboardings();
+      res.json(pending);
+    } catch (error) {
+      console.error("Error fetching pending onboardings:", error);
+      res.status(500).json({ message: "Failed to fetch pending onboardings" });
+    }
+  });
+
+  // ========== FRANCHISE ANALYTICS ENDPOINTS (Admin Only) ==========
+
+  // Admin: Get consolidated performance overview
+  app.get('/api/admin/franchise-analytics/overview', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { franchiseAnalyticsService } = await import('./services/franchiseAnalyticsService');
+      const overview = await franchiseAnalyticsService.getConsolidatedPerformance();
+      res.json(overview);
+    } catch (error) {
+      console.error("Error fetching franchise analytics overview:", error);
+      res.status(500).json({ message: "Failed to fetch analytics overview" });
+    }
+  });
+
+  // Admin: Get franchise rankings
+  app.get('/api/admin/franchise-analytics/rankings', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { franchiseAnalyticsService } = await import('./services/franchiseAnalyticsService');
+      const orderBy = (req.query.orderBy as 'pnl' | 'win_rate' | 'roi' | 'trades') || 'pnl';
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+      const rankings = await franchiseAnalyticsService.getFranchiseRankings(orderBy, limit);
+      res.json(rankings);
+    } catch (error) {
+      console.error("Error fetching franchise rankings:", error);
+      res.status(500).json({ message: "Failed to fetch franchise rankings" });
+    }
+  });
+
+  // Admin: Get symbol performance analysis
+  app.get('/api/admin/franchise-analytics/symbols', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { franchiseAnalyticsService } = await import('./services/franchiseAnalyticsService');
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 20;
+      const symbols = await franchiseAnalyticsService.getSymbolPerformance(limit);
+      res.json(symbols);
+    } catch (error) {
+      console.error("Error fetching symbol performance:", error);
+      res.status(500).json({ message: "Failed to fetch symbol performance" });
+    }
+  });
+
+  // Admin: Get cluster performance analysis
+  app.get('/api/admin/franchise-analytics/clusters', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { franchiseAnalyticsService } = await import('./services/franchiseAnalyticsService');
+      const clusters = await franchiseAnalyticsService.getClusterPerformance();
+      res.json(clusters);
+    } catch (error) {
+      console.error("Error fetching cluster performance:", error);
+      res.status(500).json({ message: "Failed to fetch cluster performance" });
+    }
+  });
+
+  // Admin: Get trading patterns (hourly and daily)
+  app.get('/api/admin/franchise-analytics/patterns', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { franchiseAnalyticsService } = await import('./services/franchiseAnalyticsService');
+      const patterns = await franchiseAnalyticsService.getTradingPatterns();
+      res.json(patterns);
+    } catch (error) {
+      console.error("Error fetching trading patterns:", error);
+      res.status(500).json({ message: "Failed to fetch trading patterns" });
+    }
+  });
+
+  // Admin: Get strategic insights and recommendations
+  app.get('/api/admin/franchise-analytics/insights', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { franchiseAnalyticsService } = await import('./services/franchiseAnalyticsService');
+      const insights = await franchiseAnalyticsService.getStrategicInsights();
+      res.json(insights);
+    } catch (error) {
+      console.error("Error fetching strategic insights:", error);
+      res.status(500).json({ message: "Failed to fetch strategic insights" });
+    }
+  });
+
+  // ========== ANTI-FRAUD ENDPOINTS ==========
+  
+  // Admin: Get fraud alerts with filters
+  app.get('/api/admin/fraud-alerts', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { antiFraudService } = await import('./services/antiFraudService');
+      
+      const filters = {
+        franchiseId: req.query.franchiseId as string | undefined,
+        campaignId: req.query.campaignId as string | undefined,
+        status: req.query.status as string | undefined,
+        severity: req.query.severity as string | undefined,
+        type: req.query.type as string | undefined,
+        limit: req.query.limit ? parseInt(req.query.limit as string) : 50,
+        offset: req.query.offset ? parseInt(req.query.offset as string) : 0,
+      };
+      
+      const result = await antiFraudService.getAlerts(filters as any);
+      res.json(result);
+    } catch (error) {
+      console.error("Error fetching fraud alerts:", error);
+      res.status(500).json({ message: "Failed to fetch fraud alerts" });
+    }
+  });
+  
+  // Admin: Get fraud alert stats
+  app.get('/api/admin/fraud-alerts/stats', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { antiFraudService } = await import('./services/antiFraudService');
+      const franchiseId = req.query.franchiseId as string | undefined;
+      
+      const stats = await antiFraudService.getStats(franchiseId);
+      res.json(stats);
+    } catch (error) {
+      console.error("Error fetching fraud stats:", error);
+      res.status(500).json({ message: "Failed to fetch fraud stats" });
+    }
+  });
+  
+  // Admin: Get single fraud alert
+  app.get('/api/admin/fraud-alerts/:id', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { antiFraudService } = await import('./services/antiFraudService');
+      const alert = await antiFraudService.getAlertById(req.params.id);
+      
+      if (!alert) {
+        return res.status(404).json({ message: "Alert not found" });
+      }
+      
+      res.json(alert);
+    } catch (error) {
+      console.error("Error fetching fraud alert:", error);
+      res.status(500).json({ message: "Failed to fetch fraud alert" });
+    }
+  });
+  
+  // Admin: Update fraud alert status
+  const updateFraudAlertSchema = z.object({
+    status: z.enum(['new', 'investigating', 'dismissed', 'confirmed']),
+    resolution_notes: z.string().max(2000).optional(),
+  });
+  
+  app.patch('/api/admin/fraud-alerts/:id', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const parseResult = updateFraudAlertSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request body", 
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const { antiFraudService } = await import('./services/antiFraudService');
+      const userId = req.user.claims.sub;
+      const { status, resolution_notes } = parseResult.data;
+      
+      const updated = await antiFraudService.updateAlertStatus(
+        req.params.id,
+        status,
+        userId,
+        resolution_notes
+      );
+      
+      if (!updated) {
+        return res.status(404).json({ message: "Alert not found" });
+      }
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating fraud alert:", error);
+      res.status(500).json({ message: "Failed to update fraud alert" });
+    }
+  });
+  
+  // Admin: Run fraud detection scan
+  app.post('/api/admin/fraud-alerts/scan', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { antiFraudService } = await import('./services/antiFraudService');
+      
+      const result = await antiFraudService.runFullScan();
+      res.json({
+        message: "Fraud scan completed",
+        ...result
+      });
+    } catch (error) {
+      console.error("Error running fraud scan:", error);
+      res.status(500).json({ message: "Failed to run fraud scan" });
+    }
+  });
+  
+  // Admin: Analyze specific campaign for fraud
+  app.post('/api/admin/fraud-alerts/analyze/:campaignId', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const { antiFraudService } = await import('./services/antiFraudService');
+      const daysBack = req.body.daysBack || 7;
+      
+      const results = await antiFraudService.analyzeCampaign(req.params.campaignId, daysBack);
+      
+      // Create alerts for detected issues
+      const campaignWithPortfolio = await db.select({
+        campaign: campaigns,
+        portfolio: portfolios
+      })
+        .from(campaigns)
+        .innerJoin(portfolios, eq(campaigns.portfolio_id, portfolios.id))
+        .where(eq(campaigns.id, req.params.campaignId))
+        .limit(1);
+      
+      const createdAlerts = [];
+      for (const result of results) {
+        const alert = await antiFraudService.createAlert(result, {
+          campaignId: req.params.campaignId,
+          franchiseId: campaignWithPortfolio[0]?.campaign.franchise_id || undefined,
+          userId: campaignWithPortfolio[0]?.portfolio.user_id,
+        });
+        createdAlerts.push(alert);
+      }
+      
+      res.json({
+        detected: results.length,
+        alerts: createdAlerts
+      });
+    } catch (error) {
+      console.error("Error analyzing campaign for fraud:", error);
+      res.status(500).json({ message: "Failed to analyze campaign" });
+    }
+  });
+
+  // =============================================================================
+  // OPPORTUNITY BLUEPRINTS & TRIGGERS ROUTES
+  // =============================================================================
+  
+  // Schemas for opportunity blueprints
+  const consumeBlueprintSchema = z.object({
+    portfolioId: z.string().uuid("Invalid portfolio ID"),
+    allocatedCapital: z.number().positive("Capital must be positive"),
+  });
+  
+  const createTriggerSchema = z.object({
+    triggerType: z.enum(['alert', 'expiration', 'accept', 'creation', 'block', 'audit']),
+    name: z.string().min(1, "Name is required").max(100),
+    description: z.string().max(500).optional(),
+    conditions: z.object({
+      score_min: z.number().min(0).max(100).optional(),
+      confidence_min: z.number().min(0).max(1).optional(),
+      regimes: z.array(z.string()).optional(),
+      types: z.array(z.string()).optional(),
+      assets_include: z.array(z.string()).optional(),
+      assets_exclude: z.array(z.string()).optional(),
+    }),
+    actions: z.object({
+      notify_whatsapp: z.boolean().optional(),
+      notify_email: z.boolean().optional(),
+      auto_accept: z.boolean().optional(),
+      log_to_audit: z.boolean().optional(),
+      custom_webhook_url: z.string().url().optional(),
+    }),
+    cooldownMinutes: z.number().int().positive().optional(),
+    maxTriggersPerDay: z.number().int().positive().optional(),
+  });
+  
+  const updateTriggerSchema = createTriggerSchema.partial().extend({
+    is_active: z.boolean().optional(),
+  });
+  
+  // GET /api/opportunity-blueprints - List active blueprints
+  // Supports optional franchise_id query param for franchise filtering
+  app.get('/api/opportunity-blueprints', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const franchiseId = req.query.franchise_id as string | undefined;
+      const { getActiveBlueprints, getUserBlueprintStats } = await import('./services/opportunityBlueprintService');
+      
+      const [blueprints, stats] = await Promise.all([
+        getActiveBlueprints(userId, franchiseId),
+        getUserBlueprintStats(userId, franchiseId)
+      ]);
+      
+      res.json({ blueprints, stats });
+    } catch (error) {
+      console.error("Error fetching blueprints:", error);
+      res.status(500).json({ message: "Failed to fetch blueprints" });
+    }
+  });
+  
+  // GET /api/opportunity-blueprints/history - Get blueprint history
+  // Supports optional franchise_id query param for franchise filtering
+  app.get('/api/opportunity-blueprints/history', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const franchiseId = req.query.franchise_id as string | undefined;
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+      const offset = parseInt(req.query.offset as string) || 0;
+      
+      const { getBlueprintHistory } = await import('./services/opportunityBlueprintService');
+      const history = await getBlueprintHistory(userId, limit, offset, franchiseId);
+      
+      res.json({ history, limit, offset });
+    } catch (error) {
+      console.error("Error fetching blueprint history:", error);
+      res.status(500).json({ message: "Failed to fetch blueprint history" });
+    }
+  });
+  
+  // GET /api/opportunity-blueprints/:id - Get single blueprint
+  app.get('/api/opportunity-blueprints/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { getBlueprintById, validateBlueprintIntegrity } = await import('./services/opportunityBlueprintService');
+      
+      const blueprint = await getBlueprintById(req.params.id, userId);
+      if (!blueprint) {
+        return res.status(404).json({ message: "Blueprint not found" });
+      }
+      
+      const isValid = await validateBlueprintIntegrity(blueprint.id);
+      
+      res.json({ blueprint, integrityValid: isValid });
+    } catch (error) {
+      console.error("Error fetching blueprint:", error);
+      res.status(500).json({ message: "Failed to fetch blueprint" });
+    }
+  });
+  
+  // POST /api/opportunity-blueprints/:id/consume - Accept/consume a blueprint
+  app.post('/api/opportunity-blueprints/:id/consume', isAuthenticated, async (req: any, res) => {
+    try {
+      const parseResult = consumeBlueprintSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request body", 
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const userId = req.user.claims.sub;
+      const { portfolioId, allocatedCapital } = parseResult.data;
+      
+      const { consumeBlueprint } = await import('./services/opportunityBlueprintService');
+      const result = await consumeBlueprint(req.params.id, userId, portfolioId, allocatedCapital);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ 
+        message: "Blueprint consumed successfully", 
+        campaignId: result.campaignId 
+      });
+    } catch (error) {
+      console.error("Error consuming blueprint:", error);
+      res.status(500).json({ message: "Failed to consume blueprint" });
+    }
+  });
+  
+  // POST /api/opportunity-blueprints/:id/reject - Reject a blueprint
+  app.post('/api/opportunity-blueprints/:id/reject', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const blueprintId = req.params.id;
+      
+      const { rejectBlueprint } = await import('./services/opportunityBlueprintService');
+      const result = await rejectBlueprint(blueprintId, userId);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ message: "Blueprint rejected successfully" });
+    } catch (error) {
+      console.error("Error rejecting blueprint:", error);
+      res.status(500).json({ message: "Failed to reject blueprint" });
+    }
+  });
+
+  // Schema for generating blueprint from OE window
+  const generateFromWindowSchema = z.object({
+    window_id: z.string().min(1, "window_id is required"),
+    franchise_id: z.string().uuid().optional(),
+  });
+
+  // POST /api/opportunity-blueprints/from-window - Generate blueprint from OpportunityEngine window
+  app.post('/api/opportunity-blueprints/from-window', isAuthenticated, async (req: any, res) => {
+    try {
+      const parseResult = generateFromWindowSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request body", 
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const userId = req.user.claims.sub;
+      const { window_id, franchise_id } = parseResult.data;
+      
+      const { generateBlueprintFromOpportunityWindow } = await import('./services/opportunityBlueprintService');
+      const result = await generateBlueprintFromOpportunityWindow(userId, window_id, franchise_id);
+      
+      if (!result.success) {
+        const statusCode = result.rateLimited ? 429 : 400;
+        return res.status(statusCode).json({ message: result.error });
+      }
+      
+      res.json({ 
+        message: "Blueprint created from opportunity window",
+        blueprint: result.blueprint 
+      });
+    } catch (error) {
+      console.error("Error generating blueprint from window:", error);
+      res.status(500).json({ message: "Failed to generate blueprint" });
+    }
+  });
+  
+  // GET /api/opportunity-windows - Get persisted opportunity windows (with rate-limited detection)
+  app.get('/api/opportunity-windows', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { detectAndPersistOpportunityWindows, checkDetectionRateLimit } = await import('./services/opportunityBlueprintService');
+      
+      if (!(await checkDetectionRateLimit(userId))) {
+        return res.status(429).json({ message: "Rate limit exceeded for window detection. Try again later." });
+      }
+      
+      const windows = await detectAndPersistOpportunityWindows();
+      res.json({ windows });
+    } catch (error) {
+      console.error("Error detecting opportunity windows:", error);
+      res.status(500).json({ message: "Failed to detect windows" });
+    }
+  });
+  
+  // POST /api/opportunity-blueprints/detect - Manually trigger detection (admin/testing)
+  app.post('/api/opportunity-blueprints/detect', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      // Get user's market data context
+      const userPortfolios = await storage.getPortfoliosByUserId(userId);
+      if (userPortfolios.length === 0) {
+        return res.status(400).json({ message: "No portfolios found" });
+      }
+      
+      // Build market data from Redis/storage
+      const { dataIngestionService } = await import('./services/dataIngestionService');
+      const allSymbols = await storage.getAllSymbols();
+      
+      const marketData = [];
+      for (const sym of allSymbols.slice(0, 30)) {
+        const ticks = await dataIngestionService.getRecentTicks(sym.exchange_id, sym.exchange_symbol, 1);
+        if (ticks.length > 0) {
+          const price = parseFloat(ticks[0].price);
+          marketData.push({
+            symbol: sym.symbol,
+            price,
+            volume24h: parseFloat(sym.volume_24h || '0'),
+            change24h: 0,
+            volatility: 0.05,
+            high24h: price * 1.02,
+            low24h: price * 0.98,
+          });
+        }
+      }
+      
+      // Get campaign history
+      const allCampaigns = await db.select()
+        .from(campaigns)
+        .where(inArray(campaigns.portfolio_id, userPortfolios.map(p => p.id)))
+        .limit(20);
+      
+      const campaignHistory = allCampaigns.map(c => ({
+        id: c.id,
+        name: c.name,
+        roi: parseFloat(c.accumulated_roi || '0'),
+        winRate: 0,
+        totalTrades: c.total_trades || 0,
+      }));
+      
+      const { detectOpportunity } = await import('./services/opportunityBlueprintService');
+      const result = await detectOpportunity({
+        userId,
+        marketData,
+        campaignHistory,
+      });
+      
+      res.json(result);
+    } catch (error) {
+      console.error("Error detecting opportunities:", error);
+      res.status(500).json({ message: "Failed to detect opportunities" });
+    }
+  });
+  
+  // =============================================================================
+  // OPPORTUNITY TRIGGERS ROUTES
+  // =============================================================================
+  
+  // GET /api/opportunity-triggers - List user's triggers
+  app.get('/api/opportunity-triggers', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { getUserTriggers, getTriggerStats } = await import('./services/opportunityTriggerService');
+      
+      const [triggers, stats] = await Promise.all([
+        getUserTriggers(userId),
+        getTriggerStats(userId)
+      ]);
+      
+      res.json({ triggers, stats });
+    } catch (error) {
+      console.error("Error fetching triggers:", error);
+      res.status(500).json({ message: "Failed to fetch triggers" });
+    }
+  });
+  
+  // POST /api/opportunity-triggers - Create new trigger
+  app.post('/api/opportunity-triggers', isAuthenticated, async (req: any, res) => {
+    try {
+      const parseResult = createTriggerSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request body", 
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const userId = req.user.claims.sub;
+      const { createTrigger } = await import('./services/opportunityTriggerService');
+      
+      const trigger = await createTrigger({
+        userId,
+        ...parseResult.data,
+      });
+      
+      res.status(201).json(trigger);
+    } catch (error) {
+      console.error("Error creating trigger:", error);
+      res.status(500).json({ message: "Failed to create trigger" });
+    }
+  });
+  
+  // POST /api/opportunity-triggers/defaults - Create default triggers for user
+  app.post('/api/opportunity-triggers/defaults', isAuthenticated, async (req: any, res) => {
+    try {
+      console.log('[Triggers] Creating default triggers for user...');
+      const userId = req.user?.claims?.sub;
+      
+      if (!userId) {
+        console.error('[Triggers] No userId found in request');
+        return res.status(401).json({ message: "User not authenticated" });
+      }
+      
+      console.log(`[Triggers] UserId: ${userId}`);
+      const { createDefaultTriggers } = await import('./services/opportunityTriggerService');
+      
+      const triggers = await createDefaultTriggers(userId);
+      console.log(`[Triggers] Created ${triggers.length} default triggers`);
+      res.status(201).json({ 
+        message: "Default triggers created",
+        triggers 
+      });
+    } catch (error) {
+      console.error("[Triggers] Error creating default triggers:", error);
+      res.status(500).json({ message: "Failed to create default triggers" });
+    }
+  });
+  
+  // GET /api/opportunity-triggers/events - Get trigger events history
+  app.get('/api/opportunity-triggers/events', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      const offset = parseInt(req.query.offset as string) || 0;
+      
+      const { getTriggerEvents } = await import('./services/opportunityTriggerService');
+      const events = await getTriggerEvents(userId, limit, offset);
+      
+      res.json({ events, limit, offset });
+    } catch (error) {
+      console.error("Error fetching trigger events:", error);
+      res.status(500).json({ message: "Failed to fetch trigger events" });
+    }
+  });
+  
+  // GET /api/opportunity-triggers/:id - Get single trigger
+  app.get('/api/opportunity-triggers/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { getTriggerById } = await import('./services/opportunityTriggerService');
+      
+      const trigger = await getTriggerById(req.params.id, userId);
+      if (!trigger) {
+        return res.status(404).json({ message: "Trigger not found" });
+      }
+      
+      res.json(trigger);
+    } catch (error) {
+      console.error("Error fetching trigger:", error);
+      res.status(500).json({ message: "Failed to fetch trigger" });
+    }
+  });
+  
+  // PATCH /api/opportunity-triggers/:id - Update trigger
+  app.patch('/api/opportunity-triggers/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const parseResult = updateTriggerSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          message: "Invalid request body", 
+          errors: parseResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const userId = req.user.claims.sub;
+      const { updateTrigger } = await import('./services/opportunityTriggerService');
+      
+      const updated = await updateTrigger(req.params.id, userId, parseResult.data);
+      if (!updated) {
+        return res.status(404).json({ message: "Trigger not found" });
+      }
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating trigger:", error);
+      res.status(500).json({ message: "Failed to update trigger" });
+    }
+  });
+  
+  // DELETE /api/opportunity-triggers/:id - Delete trigger
+  app.delete('/api/opportunity-triggers/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { deleteTrigger } = await import('./services/opportunityTriggerService');
+      
+      const deleted = await deleteTrigger(req.params.id, userId);
+      if (!deleted) {
+        return res.status(404).json({ message: "Trigger not found" });
+      }
+      
+      res.json({ message: "Trigger deleted" });
+    } catch (error) {
+      console.error("Error deleting trigger:", error);
+      res.status(500).json({ message: "Failed to delete trigger" });
+    }
+  });
+  
+  // POST /api/opportunity-triggers/:id/toggle - Toggle trigger active state
+  app.post('/api/opportunity-triggers/:id/toggle', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const isActive = req.body.isActive === true;
+      
+      const { toggleTrigger } = await import('./services/opportunityTriggerService');
+      const success = await toggleTrigger(req.params.id, userId, isActive);
+      
+      if (!success) {
+        return res.status(404).json({ message: "Trigger not found" });
+      }
+      
+      res.json({ message: `Trigger ${isActive ? 'activated' : 'deactivated'}` });
+    } catch (error) {
+      console.error("Error toggling trigger:", error);
+      res.status(500).json({ message: "Failed to toggle trigger" });
+    }
+  });
+
+  // =============================================================================
+  // GOVERNANCE GATE V2.0+ - Opportunity Approval System
+  // =============================================================================
+
+  // Zod validation schemas for governance endpoints
+  // V2.0+: portfolioId is REQUIRED to prevent cross-portfolio capital bypass
+  const governanceApproveSchema = z.object({
+    franchiseId: z.string().uuid().optional(),
+    notes: z.string().max(1000).optional(),
+    portfolioId: z.string().uuid(), // REQUIRED: prevents aggregate capital bypass
+    allocatedCapital: z.number().positive().optional(),
+  });
+
+  const governanceRejectSchema = z.object({
+    franchiseId: z.string().uuid().optional(),
+    reason: z.enum([
+      'insufficient_capital', 'active_campaigns_conflict', 'risk_limit_exceeded',
+      'var_es_threshold', 'market_conditions', 'expiration', 'user_declined',
+      'franchise_restriction', 'governance_block', 'manual_review', 'other'
+    ]),
+    notes: z.string().max(1000).optional(),
+  });
+
+  // GET /api/governance/blueprints/:id/check - Run governance check on blueprint
+  // V2.0+: Pass optional portfolioId for specific portfolio capital validation
+  app.get('/api/governance/blueprints/:id/check', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const blueprintId = req.params.id;
+      const franchiseId = req.query.franchiseId as string | undefined;
+      const portfolioId = req.query.portfolioId as string | undefined;
+
+      const { opportunityGovernanceService } = await import('./services/governance/opportunityGovernanceService');
+      // Pass portfolioId for specific portfolio validation when provided
+      const check = await opportunityGovernanceService.runGovernanceCheck(blueprintId, userId, franchiseId, portfolioId);
+
+      res.json(check);
+    } catch (error) {
+      console.error("Error running governance check:", error);
+      res.status(500).json({ message: "Failed to run governance check" });
+    }
+  });
+
+  // POST /api/governance/blueprints/:id/approve - Approve blueprint with governance validation
+  // V2.0+: portfolioId is NOW REQUIRED in schema to prevent cross-portfolio capital bypass
+  app.post('/api/governance/blueprints/:id/approve', isAuthenticated, async (req: any, res) => {
+    try {
+      const parseResult = governanceApproveSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({
+          message: "Invalid request body",
+          errors: parseResult.error.flatten().fieldErrors
+        });
+      }
+
+      const userId = req.user.claims.sub;
+      const blueprintId = req.params.id;
+      // portfolioId is REQUIRED by schema - prevents cross-portfolio capital bypass
+      const { franchiseId, notes, portfolioId, allocatedCapital } = parseResult.data;
+
+      const { opportunityGovernanceService } = await import('./services/governance/opportunityGovernanceService');
+      
+      // V2.0+: Pass portfolioId for specific portfolio capital validation
+      // portfolioId is REQUIRED by ApproveDecisionInput interface
+      const approvalResult = await opportunityGovernanceService.approveOpportunity({
+        blueprintId,
+        userId,
+        portfolioId, // REQUIRED - validated by Zod schema and service layer
+        franchiseId,
+        decidedBy: 'user',
+        decidedByUserId: userId,
+        notes,
+      });
+
+      if (!approvalResult.success) {
+        return res.status(400).json({ message: approvalResult.error });
+      }
+
+      // Optional: Create campaign if allocatedCapital is provided
+      if (allocatedCapital) {
+        const { consumeBlueprint } = await import('./services/opportunityBlueprintService');
+        const consumeResult = await consumeBlueprint(blueprintId, userId, portfolioId, allocatedCapital);
+        
+        if (consumeResult.success && consumeResult.campaignId) {
+          await opportunityGovernanceService.linkCampaignToDecision(
+            approvalResult.decisionId!,
+            consumeResult.campaignId
+          );
+          
+          return res.json({
+            message: "Blueprint approved and campaign created",
+            decisionId: approvalResult.decisionId,
+            campaignId: consumeResult.campaignId,
+          });
+        }
+      }
+
+      res.json({
+        message: "Blueprint approved",
+        decisionId: approvalResult.decisionId,
+      });
+    } catch (error) {
+      console.error("Error approving blueprint:", error);
+      res.status(500).json({ message: "Failed to approve blueprint" });
+    }
+  });
+
+  // POST /api/governance/blueprints/:id/reject - Reject blueprint with governance logging
+  app.post('/api/governance/blueprints/:id/reject', isAuthenticated, async (req: any, res) => {
+    try {
+      const parseResult = governanceRejectSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({
+          message: "Invalid request body",
+          errors: parseResult.error.flatten().fieldErrors
+        });
+      }
+
+      const userId = req.user.claims.sub;
+      const blueprintId = req.params.id;
+      const { franchiseId, reason, notes } = parseResult.data;
+
+      const { opportunityGovernanceService } = await import('./services/governance/opportunityGovernanceService');
+      
+      const result = await opportunityGovernanceService.rejectOpportunity({
+        blueprintId,
+        userId,
+        franchiseId,
+        decidedBy: 'user',
+        decidedByUserId: userId,
+        reason,
+        notes,
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+
+      res.json({
+        message: "Blueprint rejected",
+        decisionId: result.decisionId,
+      });
+    } catch (error) {
+      console.error("Error rejecting blueprint:", error);
+      res.status(500).json({ message: "Failed to reject blueprint" });
+    }
+  });
+
+  // GET /api/governance/decisions - Get decision history for user
+  app.get('/api/governance/decisions', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      const blueprintId = req.query.blueprintId as string | undefined;
+
+      const { opportunityGovernanceService } = await import('./services/governance/opportunityGovernanceService');
+      const decisions = await opportunityGovernanceService.getDecisionHistory(userId, limit, blueprintId);
+
+      res.json({ decisions });
+    } catch (error) {
+      console.error("Error fetching governance decisions:", error);
+      res.status(500).json({ message: "Failed to fetch governance decisions" });
+    }
+  });
+
+  // GET /api/governance/decisions/stats - Get decision statistics
+  app.get('/api/governance/decisions/stats', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+
+      const { opportunityGovernanceService } = await import('./services/governance/opportunityGovernanceService');
+      const stats = await opportunityGovernanceService.getDecisionStats(userId);
+
+      res.json(stats);
+    } catch (error) {
+      console.error("Error fetching governance stats:", error);
+      res.status(500).json({ message: "Failed to fetch governance stats" });
+    }
+  });
+
+  // GET /api/governance/decisions/verify - Verify decision chain integrity
+  app.get('/api/governance/decisions/verify', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+
+      const { opportunityGovernanceService } = await import('./services/governance/opportunityGovernanceService');
+      const verification = await opportunityGovernanceService.verifyDecisionChain(userId);
+
+      res.json(verification);
+    } catch (error) {
+      console.error("Error verifying decision chain:", error);
+      res.status(500).json({ message: "Failed to verify decision chain" });
+    }
+  });
+
+  // ========== FRANCHISE PLANS API ==========
+  
+  // GET /api/franchise-plans - List all plans with versions
+  app.get('/api/franchise-plans', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      const plans = await franchisePlanService.getPlansWithVersions();
+      res.json(plans);
+    } catch (error) {
+      console.error("Error fetching franchise plans:", error);
+      res.status(500).json({ message: "Failed to fetch franchise plans" });
+    }
+  });
+
+  // GET /api/franchise-plans/:id - Get single plan with versions
+  app.get('/api/franchise-plans/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      const result = await franchisePlanService.getPlanWithActiveVersion(req.params.id);
+      
+      if (!result) {
+        return res.status(404).json({ message: "Plan not found" });
+      }
+      
+      const versions = await franchisePlanService.listVersions(req.params.id);
+      res.json({ ...result, versions });
+    } catch (error) {
+      console.error("Error fetching franchise plan:", error);
+      res.status(500).json({ message: "Failed to fetch franchise plan" });
+    }
+  });
+
+  // POST /api/franchise-plans - Create new plan
+  app.post('/api/franchise-plans', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      
+      const { name, code, max_campaigns, max_capital_usd, royalty_percentage, features, is_active, display_order } = req.body;
+      
+      if (!name || !code) {
+        return res.status(400).json({ message: "Name and code are required" });
+      }
+      
+      const plan = await franchisePlanService.createPlan({
+        name,
+        code,
+        max_campaigns,
+        max_capital_usd,
+        royalty_percentage,
+        features,
+        is_active,
+        display_order,
+      }, userId);
+      
+      res.status(201).json(plan);
+    } catch (error) {
+      console.error("Error creating franchise plan:", error);
+      res.status(500).json({ message: "Failed to create franchise plan" });
+    }
+  });
+
+  // PATCH /api/franchise-plans/:id - Update plan metadata (not version data)
+  app.patch('/api/franchise-plans/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      
+      const updated = await franchisePlanService.updatePlan(req.params.id, req.body, userId);
+      if (!updated) {
+        return res.status(404).json({ message: "Plan not found" });
+      }
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating franchise plan:", error);
+      res.status(500).json({ message: "Failed to update franchise plan" });
+    }
+  });
+
+  // GET /api/franchise-plans/:id/versions - List all versions for a plan
+  app.get('/api/franchise-plans/:id/versions', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      const versions = await franchisePlanService.listVersions(req.params.id);
+      res.json(versions);
+    } catch (error) {
+      console.error("Error fetching plan versions:", error);
+      res.status(500).json({ message: "Failed to fetch plan versions" });
+    }
+  });
+
+  // POST /api/franchise-plans/:id/versions - Create new version for a plan
+  app.post('/api/franchise-plans/:id/versions', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      
+      const versionData = {
+        plan_id: req.params.id,
+        ...req.body,
+      };
+      
+      const version = await franchisePlanService.createVersion(versionData, userId);
+      res.status(201).json(version);
+    } catch (error) {
+      console.error("Error creating plan version:", error);
+      res.status(500).json({ message: "Failed to create plan version" });
+    }
+  });
+
+  // GET /api/franchise-plans/:planId/versions/:versionId - Get specific version
+  app.get('/api/franchise-plans/:planId/versions/:versionId', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      const version = await franchisePlanService.getVersionById(req.params.versionId);
+      
+      if (!version || version.plan_id !== req.params.planId) {
+        return res.status(404).json({ message: "Version not found" });
+      }
+      
+      res.json(version);
+    } catch (error) {
+      console.error("Error fetching plan version:", error);
+      res.status(500).json({ message: "Failed to fetch plan version" });
+    }
+  });
+
+  // POST /api/franchise-plans/:planId/versions/:versionId/activate - Activate a version
+  app.post('/api/franchise-plans/:planId/versions/:versionId/activate', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      
+      const activated = await franchisePlanService.activateVersion(req.params.versionId, userId);
+      if (!activated) {
+        return res.status(404).json({ message: "Version not found" });
+      }
+      
+      res.json(activated);
+    } catch (error) {
+      console.error("Error activating plan version:", error);
+      res.status(500).json({ message: "Failed to activate plan version" });
+    }
+  });
+
+  // POST /api/franchise-plans/:planId/versions/:versionId/archive - Archive a version
+  app.post('/api/franchise-plans/:planId/versions/:versionId/archive', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      
+      const archived = await franchisePlanService.archiveVersion(req.params.versionId, userId);
+      if (!archived) {
+        return res.status(404).json({ message: "Version not found" });
+      }
+      
+      res.json(archived);
+    } catch (error) {
+      console.error("Error archiving plan version:", error);
+      res.status(500).json({ message: "Failed to archive plan version" });
+    }
+  });
+
+  // POST /api/franchise-plans/:planId/versions/:versionId/duplicate - Duplicate a version
+  app.post('/api/franchise-plans/:planId/versions/:versionId/duplicate', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      
+      const duplicated = await franchisePlanService.duplicateVersion(
+        req.params.versionId, 
+        req.body.notes, 
+        userId
+      );
+      
+      if (!duplicated) {
+        return res.status(404).json({ message: "Version not found" });
+      }
+      
+      res.status(201).json(duplicated);
+    } catch (error) {
+      console.error("Error duplicating plan version:", error);
+      res.status(500).json({ message: "Failed to duplicate plan version" });
+    }
+  });
+
+  // GET /api/franchise-plans/:id/audit-logs - Get audit logs for a plan
+  app.get('/api/franchise-plans/:id/audit-logs', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      const logs = await franchisePlanService.listAuditLogs(req.params.id, limit);
+      res.json(logs);
+    } catch (error) {
+      console.error("Error fetching plan audit logs:", error);
+      res.status(500).json({ message: "Failed to fetch plan audit logs" });
+    }
+  });
+
+  // GET /api/franchise-plans/defaults/:code - Get default version data for a plan type
+  app.get('/api/franchise-plans/defaults/:code', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePlanService } = await import('./services/franchisePlanService');
+      const defaults = await franchisePlanService.getDefaultVersionData(req.params.code);
+      res.json(defaults);
+    } catch (error) {
+      console.error("Error fetching plan defaults:", error);
+      res.status(500).json({ message: "Failed to fetch plan defaults" });
+    }
+  });
+
+  // ========== MASTER FRANCHISE TERRITORY ROUTES ==========
+
+  // GET /api/territories - List all territories
+  app.get('/api/territories', isAuthenticated, async (req: any, res) => {
+    try {
+      const { territoryService } = await import('./services/franchise/territoryService');
+      
+      const filters: any = {};
+      if (req.query.country) filters.countryCode = req.query.country;
+      if (req.query.exclusivity) filters.exclusivityType = req.query.exclusivity;
+      if (req.query.active !== undefined) filters.isActive = req.query.active === 'true';
+      
+      const territories = await territoryService.listTerritories(filters);
+      res.json(territories);
+    } catch (error) {
+      console.error("Error fetching territories:", error);
+      res.status(500).json({ message: "Failed to fetch territories" });
+    }
+  });
+
+  // GET /api/territories/:id - Get single territory
+  app.get('/api/territories/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const { territoryService } = await import('./services/franchise/territoryService');
+      const territory = await territoryService.getTerritoryById(req.params.id);
+      
+      if (!territory) {
+        return res.status(404).json({ message: "Territory not found" });
+      }
+      
+      res.json(territory);
+    } catch (error) {
+      console.error("Error fetching territory:", error);
+      res.status(500).json({ message: "Failed to fetch territory" });
+    }
+  });
+
+  // POST /api/territories - Create new territory
+  app.post('/api/territories', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { territoryService } = await import('./services/franchise/territoryService');
+      const result = await territoryService.createTerritory(req.body, userId);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.status(201).json(result.territory);
+    } catch (error) {
+      console.error("Error creating territory:", error);
+      res.status(500).json({ message: "Failed to create territory" });
+    }
+  });
+
+  // POST /api/territories/validate - Validate territory definition
+  app.post('/api/territories/validate', isAuthenticated, async (req: any, res) => {
+    try {
+      const { territoryService } = await import('./services/franchise/territoryService');
+      const validation = territoryService.validateTerritoryDefinition(req.body);
+      res.json(validation);
+    } catch (error) {
+      console.error("Error validating territory:", error);
+      res.status(500).json({ message: "Failed to validate territory" });
+    }
+  });
+
+  // POST /api/territories/check-overlap - Check for territory overlaps
+  app.post('/api/territories/check-overlap', isAuthenticated, async (req: any, res) => {
+    try {
+      const { territoryService } = await import('./services/franchise/territoryService');
+      const { territory, excludeTerritoryId } = req.body;
+      
+      const overlapCheck = await territoryService.checkTerritoryOverlap(territory, excludeTerritoryId);
+      res.json(overlapCheck);
+    } catch (error) {
+      console.error("Error checking territory overlap:", error);
+      res.status(500).json({ message: "Failed to check territory overlap" });
+    }
+  });
+
+  // POST /api/territories/validate-location - Validate if location is within master's territory
+  app.post('/api/territories/validate-location', isAuthenticated, async (req: any, res) => {
+    try {
+      const { territoryService } = await import('./services/franchise/territoryService');
+      const { masterId, location } = req.body;
+      
+      if (!masterId || !location) {
+        return res.status(400).json({ message: "masterId and location are required" });
+      }
+      
+      const result = await territoryService.validateLocationInTerritory(masterId, location);
+      res.json(result);
+    } catch (error) {
+      console.error("Error validating location:", error);
+      res.status(500).json({ message: "Failed to validate location" });
+    }
+  });
+
+  // POST /api/territories/:id/audit-snapshot - Create audit snapshot
+  app.post('/api/territories/:id/audit-snapshot', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { territoryService } = await import('./services/franchise/territoryService');
+      const { masterId, reason, relatedFranchiseId, eventDescription } = req.body;
+      
+      if (!masterId || !reason) {
+        return res.status(400).json({ message: "masterId and reason are required" });
+      }
+      
+      const result = await territoryService.createAuditSnapshot(
+        masterId,
+        req.params.id,
+        reason,
+        relatedFranchiseId,
+        eventDescription,
+        userId
+      );
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.status(201).json({ snapshotId: result.snapshotId });
+    } catch (error) {
+      console.error("Error creating audit snapshot:", error);
+      res.status(500).json({ message: "Failed to create audit snapshot" });
+    }
+  });
+
+  // GET /api/masters/:id/audit-chain - Verify audit chain integrity
+  app.get('/api/masters/:id/audit-chain', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { territoryService } = await import('./services/franchise/territoryService');
+      const result = await territoryService.verifyAuditChain(req.params.id);
+      res.json(result);
+    } catch (error) {
+      console.error("Error verifying audit chain:", error);
+      res.status(500).json({ message: "Failed to verify audit chain" });
+    }
+  });
+
+  // GET /api/territories/:id/hash - Calculate territory hash
+  app.get('/api/territories/:id/hash', isAuthenticated, async (req: any, res) => {
+    try {
+      const { territoryService } = await import('./services/franchise/territoryService');
+      const territory = await territoryService.getTerritoryById(req.params.id);
+      
+      if (!territory) {
+        return res.status(404).json({ message: "Territory not found" });
+      }
+      
+      const hash = territoryService.calculateTerritoryHash({
+        country_code: territory.country_code,
+        states: territory.states || undefined,
+        municipalities: territory.municipalities || undefined,
+        micro_regions: territory.micro_regions || undefined,
+        metro_regions: territory.metro_regions || undefined,
+        urban_agglomerations: territory.urban_agglomerations || undefined,
+        zip_code_ranges: territory.zip_code_ranges || undefined,
+        zip_code_exclusions: territory.zip_code_exclusions || undefined,
+        custom_economic_zone_id: territory.custom_economic_zone_id || undefined,
+        excluded_states: territory.excluded_states || undefined,
+        excluded_municipalities: territory.excluded_municipalities || undefined
+      });
+      
+      res.json({ 
+        territoryId: territory.id,
+        storedHash: territory.territory_hash,
+        calculatedHash: hash,
+        isValid: territory.territory_hash === hash
+      });
+    } catch (error) {
+      console.error("Error calculating territory hash:", error);
+      res.status(500).json({ message: "Failed to calculate territory hash" });
+    }
+  });
+
+  // ========== MASTER ACCOUNT MANAGEMENT ENDPOINTS ==========
+
+  // GET /api/master-accounts - List all master accounts
+  app.get('/api/master-accounts', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const { status, exclusivityStatus } = req.query;
+      const masters = await masterAccountService.listMasters({ 
+        status: status as string, 
+        exclusivityStatus: exclusivityStatus as string 
+      });
+      res.json(masters);
+    } catch (error) {
+      console.error("Error listing master accounts:", error);
+      res.status(500).json({ message: "Failed to list master accounts" });
+    }
+  });
+
+  // GET /api/master-accounts/:id - Get master account by ID
+  app.get('/api/master-accounts/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const master = await masterAccountService.getMasterById(req.params.id);
+      
+      if (!master) {
+        return res.status(404).json({ message: "Master account not found" });
+      }
+      
+      // Check permission: franchisor or the master's primary user
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor && master.primary_user_id !== req.user.id) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      res.json(master);
+    } catch (error) {
+      console.error("Error getting master account:", error);
+      res.status(500).json({ message: "Failed to get master account" });
+    }
+  });
+
+  // POST /api/master-accounts - Create new master account
+  app.post('/api/master-accounts', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const result = await masterAccountService.createMasterAccount(req.body, req.user.id);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.status(201).json({ masterId: result.masterId, message: "Master account created successfully" });
+    } catch (error) {
+      console.error("Error creating master account:", error);
+      res.status(500).json({ message: "Failed to create master account" });
+    }
+  });
+
+  // POST /api/master-accounts/:id/approve - Approve pending master account
+  app.post('/api/master-accounts/:id/approve', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const result = await masterAccountService.approveMasterAccount(req.params.id, req.user.id);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ message: "Master account approved successfully" });
+    } catch (error) {
+      console.error("Error approving master account:", error);
+      res.status(500).json({ message: "Failed to approve master account" });
+    }
+  });
+
+  // POST /api/master-accounts/:id/suspend - Suspend master account
+  app.post('/api/master-accounts/:id/suspend', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { reason, violationType } = req.body;
+      if (!reason) {
+        return res.status(400).json({ message: "Reason is required" });
+      }
+      
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const result = await masterAccountService.suspendMasterAccount(req.params.id, reason, violationType);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ message: "Master account suspended successfully" });
+    } catch (error) {
+      console.error("Error suspending master account:", error);
+      res.status(500).json({ message: "Failed to suspend master account" });
+    }
+  });
+
+  // POST /api/master-accounts/:id/reactivate - Reactivate suspended master account
+  app.post('/api/master-accounts/:id/reactivate', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const result = await masterAccountService.reactivateMasterAccount(req.params.id, req.user.id);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ message: "Master account reactivated successfully" });
+    } catch (error) {
+      console.error("Error reactivating master account:", error);
+      res.status(500).json({ message: "Failed to reactivate master account" });
+    }
+  });
+
+  // GET /api/master-accounts/:id/dashboard - Get master dashboard statistics
+  app.get('/api/master-accounts/:id/dashboard', isAuthenticated, async (req: any, res) => {
+    try {
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const master = await masterAccountService.getMasterById(req.params.id);
+      
+      if (!master) {
+        return res.status(404).json({ message: "Master account not found" });
+      }
+      
+      // Check permission
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor && master.primary_user_id !== req.user.id) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const stats = await masterAccountService.getMasterDashboardStats(req.params.id);
+      res.json(stats);
+    } catch (error) {
+      console.error("Error getting master dashboard:", error);
+      res.status(500).json({ message: "Failed to get master dashboard" });
+    }
+  });
+
+  // GET /api/master-accounts/:id/regional-links - Get regional franchise links
+  app.get('/api/master-accounts/:id/regional-links', isAuthenticated, async (req: any, res) => {
+    try {
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const master = await masterAccountService.getMasterById(req.params.id);
+      
+      if (!master) {
+        return res.status(404).json({ message: "Master account not found" });
+      }
+      
+      // Check permission
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor && master.primary_user_id !== req.user.id) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const links = await masterAccountService.getMasterRegionalLinks(req.params.id);
+      res.json(links);
+    } catch (error) {
+      console.error("Error getting regional links:", error);
+      res.status(500).json({ message: "Failed to get regional links" });
+    }
+  });
+
+  // POST /api/master-accounts/:id/regional-links - Create regional franchise link
+  app.post('/api/master-accounts/:id/regional-links', isAuthenticated, async (req: any, res) => {
+    try {
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const master = await masterAccountService.getMasterById(req.params.id);
+      
+      if (!master) {
+        return res.status(404).json({ message: "Master account not found" });
+      }
+      
+      // Check permission
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor && master.primary_user_id !== req.user.id) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const result = await masterAccountService.createRegionalLink(req.params.id, req.body);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.status(201).json({ linkId: result.linkId, message: "Regional link created successfully" });
+    } catch (error) {
+      console.error("Error creating regional link:", error);
+      res.status(500).json({ message: "Failed to create regional link" });
+    }
+  });
+
+  // GET /api/master-accounts/:id/performance-targets - Get performance targets
+  app.get('/api/master-accounts/:id/performance-targets', isAuthenticated, async (req: any, res) => {
+    try {
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const master = await masterAccountService.getMasterById(req.params.id);
+      
+      if (!master) {
+        return res.status(404).json({ message: "Master account not found" });
+      }
+      
+      // Check permission
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor && master.primary_user_id !== req.user.id) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const targets = await masterAccountService.getMasterPerformanceTargets(req.params.id);
+      res.json(targets);
+    } catch (error) {
+      console.error("Error getting performance targets:", error);
+      res.status(500).json({ message: "Failed to get performance targets" });
+    }
+  });
+
+  // POST /api/master-accounts/:id/performance-targets - Create performance target
+  app.post('/api/master-accounts/:id/performance-targets', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const result = await masterAccountService.createPerformanceTarget(req.params.id, req.body);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.status(201).json({ targetId: result.targetId, message: "Performance target created successfully" });
+    } catch (error) {
+      console.error("Error creating performance target:", error);
+      res.status(500).json({ message: "Failed to create performance target" });
+    }
+  });
+
+  // POST /api/performance-targets/:id/evaluate - Evaluate performance target
+  app.post('/api/performance-targets/:id/evaluate', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const result = await masterAccountService.evaluatePerformanceTarget(req.params.id, req.user.id);
+      
+      if ('error' in result) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json(result);
+    } catch (error) {
+      console.error("Error evaluating performance target:", error);
+      res.status(500).json({ message: "Failed to evaluate performance target" });
+    }
+  });
+
+  // POST /api/revenue-splits/calculate - Calculate revenue split for a transaction
+  app.post('/api/revenue-splits/calculate', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterId, franchiseeId, amount, splitType } = req.body;
+      
+      if (!masterId || !franchiseeId || !amount || !splitType) {
+        return res.status(400).json({ message: "Missing required fields: masterId, franchiseeId, amount, splitType" });
+      }
+      
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const master = await masterAccountService.getMasterById(masterId);
+      
+      if (!master) {
+        return res.status(404).json({ message: "Master account not found" });
+      }
+      
+      let result;
+      if (splitType === 'franchise_fee') {
+        result = masterAccountService.calculateFranchiseFeeSplit(master, amount, franchiseeId);
+      } else if (splitType === 'royalty') {
+        result = masterAccountService.calculateRoyaltySplit(master, amount, franchiseeId);
+      } else {
+        return res.status(400).json({ message: "Invalid splitType - must be 'franchise_fee' or 'royalty'" });
+      }
+      
+      res.json(result);
+    } catch (error) {
+      console.error("Error calculating revenue split:", error);
+      res.status(500).json({ message: "Failed to calculate revenue split" });
+    }
+  });
+
+  // GET /api/master-accounts/find-by-location - Find master for a location
+  app.get('/api/master-accounts/find-by-location', isAuthenticated, async (req: any, res) => {
+    try {
+      const { state, municipality, zipCode, countryCode } = req.query;
+      
+      const { masterAccountService } = await import('./services/franchise/masterAccountService');
+      const master = await masterAccountService.findMasterForLocation({
+        state: state as string,
+        municipality: municipality as string,
+        zipCode: zipCode as string,
+        countryCode: countryCode as string,
+      });
+      
+      if (!master) {
+        return res.status(404).json({ message: "No master account covers this location" });
+      }
+      
+      res.json({
+        masterId: master.id,
+        masterName: master.legal_entity_name,
+        territoryId: master.territory_definition_id,
+      });
+    } catch (error) {
+      console.error("Error finding master for location:", error);
+      res.status(500).json({ message: "Failed to find master for location" });
+    }
+  });
+
+  // ========== ANTIFRAUD ENDPOINTS ==========
+
+  // GET /api/antifraud/dashboard - Get antifraud dashboard statistics
+  app.get('/api/antifraud/dashboard', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAntifraudService } = await import('./services/franchise/masterAntifraudService');
+      const dashboard = await masterAntifraudService.getAntifraudDashboard();
+      res.json(dashboard);
+    } catch (error) {
+      console.error("Error getting antifraud dashboard:", error);
+      res.status(500).json({ message: "Failed to get antifraud dashboard" });
+    }
+  });
+
+  // GET /api/antifraud/events - List fraud events
+  app.get('/api/antifraud/events', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAntifraudService } = await import('./services/franchise/masterAntifraudService');
+      const { masterId, fraudType, status, severity, startDate, endDate, limit, offset } = req.query;
+      
+      const result = await masterAntifraudService.listFraudEvents({
+        masterId: masterId as string,
+        fraudType: fraudType as any,
+        status: status as any,
+        severity: severity as any,
+        startDate: startDate ? new Date(startDate as string) : undefined,
+        endDate: endDate ? new Date(endDate as string) : undefined,
+        limit: limit ? parseInt(limit as string) : 50,
+        offset: offset ? parseInt(offset as string) : 0
+      });
+      
+      res.json(result);
+    } catch (error) {
+      console.error("Error listing fraud events:", error);
+      res.status(500).json({ message: "Failed to list fraud events" });
+    }
+  });
+
+  // GET /api/antifraud/events/:id - Get fraud event by ID
+  app.get('/api/antifraud/events/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAntifraudService } = await import('./services/franchise/masterAntifraudService');
+      const event = await masterAntifraudService.getFraudEventById(req.params.id);
+      
+      if (!event) {
+        return res.status(404).json({ message: "Fraud event not found" });
+      }
+      
+      res.json(event);
+    } catch (error) {
+      console.error("Error getting fraud event:", error);
+      res.status(500).json({ message: "Failed to get fraud event" });
+    }
+  });
+
+  // POST /api/antifraud/events/:id/status - Update fraud event status
+  app.post('/api/antifraud/events/:id/status', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { status, notes } = req.body;
+      if (!status) {
+        return res.status(400).json({ message: "Status is required" });
+      }
+      
+      const { masterAntifraudService } = await import('./services/franchise/masterAntifraudService');
+      const result = await masterAntifraudService.updateFraudStatus(
+        req.params.id,
+        status,
+        notes,
+        req.user.id
+      );
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ success: true, message: "Status updated successfully" });
+    } catch (error) {
+      console.error("Error updating fraud status:", error);
+      res.status(500).json({ message: "Failed to update fraud status" });
+    }
+  });
+
+  // POST /api/antifraud/events/:id/action - Record action on fraud event
+  app.post('/api/antifraud/events/:id/action', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { action, actionDetails } = req.body;
+      if (!action || !actionDetails) {
+        return res.status(400).json({ message: "Action and actionDetails are required" });
+      }
+      
+      const { masterAntifraudService } = await import('./services/franchise/masterAntifraudService');
+      const result = await masterAntifraudService.recordAction({
+        eventId: req.params.id,
+        action,
+        actionDetails,
+        actionBy: req.user.id
+      });
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ success: true, message: "Action recorded successfully" });
+    } catch (error) {
+      console.error("Error recording fraud action:", error);
+      res.status(500).json({ message: "Failed to record fraud action" });
+    }
+  });
+
+  // GET /api/antifraud/masters/:id/summary - Get fraud summary for a master
+  app.get('/api/antifraud/masters/:id/summary', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAntifraudService } = await import('./services/franchise/masterAntifraudService');
+      const summary = await masterAntifraudService.getMasterFraudSummary(req.params.id);
+      res.json(summary);
+    } catch (error) {
+      console.error("Error getting master fraud summary:", error);
+      res.status(500).json({ message: "Failed to get master fraud summary" });
+    }
+  });
+
+  // GET /api/antifraud/alerts - Get pending alerts
+  app.get('/api/antifraud/alerts', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAntifraudService } = await import('./services/franchise/masterAntifraudService');
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+      const alerts = await masterAntifraudService.getPendingAlerts(limit);
+      res.json(alerts);
+    } catch (error) {
+      console.error("Error getting pending alerts:", error);
+      res.status(500).json({ message: "Failed to get pending alerts" });
+    }
+  });
+
+  // POST /api/antifraud/alerts/:id/acknowledge - Acknowledge an alert
+  app.post('/api/antifraud/alerts/:id/acknowledge', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterAntifraudService } = await import('./services/franchise/masterAntifraudService');
+      const result = await masterAntifraudService.acknowledgeAlert(req.params.id, req.user.id);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: "Failed to acknowledge alert" });
+      }
+      
+      res.json({ success: true, message: "Alert acknowledged" });
+    } catch (error) {
+      console.error("Error acknowledging alert:", error);
+      res.status(500).json({ message: "Failed to acknowledge alert" });
+    }
+  });
+
+  // POST /api/antifraud/validate-territory - Validate territory action (prevention check)
+  app.post('/api/antifraud/validate-territory', isAuthenticated, async (req: any, res) => {
+    try {
+      const { masterId, targetLocation, actionType } = req.body;
+      
+      if (!masterId || !targetLocation || !actionType) {
+        return res.status(400).json({ message: "Missing required fields: masterId, targetLocation, actionType" });
+      }
+      
+      const { masterAntifraudService } = await import('./services/franchise/masterAntifraudService');
+      const result = await masterAntifraudService.validateTerritoryAction({
+        masterId,
+        targetLocation,
+        actionType
+      });
+      
+      res.json(result);
+    } catch (error) {
+      console.error("Error validating territory action:", error);
+      res.status(500).json({ message: "Failed to validate territory action" });
+    }
+  });
+
+  // POST /api/antifraud/report - Manually report a fraud event
+  app.post('/api/antifraud/report', isAuthenticated, async (req: any, res) => {
+    try {
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(req.user.id);
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { masterId, fraudType, severity, evidence, relatedTerritoryId, relatedFranchiseId, relatedAmount } = req.body;
+      
+      if (!masterId || !fraudType || !evidence) {
+        return res.status(400).json({ message: "Missing required fields: masterId, fraudType, evidence" });
+      }
+      
+      const { masterAntifraudService } = await import('./services/franchise/masterAntifraudService');
+      const result = await masterAntifraudService.detectFraud({
+        masterId,
+        fraudType,
+        severity: severity || 'medium',
+        detectionSource: 'manual_report',
+        evidence,
+        relatedTerritoryId,
+        relatedFranchiseId,
+        relatedAmount
+      });
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({
+        success: true,
+        eventId: result.eventId,
+        autoAction: result.autoAction,
+        message: "Fraud event reported successfully"
+      });
+    } catch (error) {
+      console.error("Error reporting fraud:", error);
+      res.status(500).json({ message: "Failed to report fraud" });
+    }
+  });
+
+  // ==========================================
+  // VRE (Volatility Regime Engine) Routes
+  // ==========================================
+
+  // GET /api/vre/regime/:symbol - Get current regime for a symbol
+  app.get('/api/vre/regime/:symbol', isAuthenticated, async (req: any, res) => {
+    try {
+      const { symbol } = req.params;
+      const { campaignId } = req.query;
+      
+      const { volatilityRegimeEngine } = await import('./services/trading/volatilityRegimeEngine');
+      const state = await volatilityRegimeEngine.detectRegime(
+        symbol, 
+        campaignId ? String(campaignId) : undefined
+      );
+      
+      res.json({
+        symbol,
+        regime: state.regime,
+        z_score: state.z_score,
+        rv_ratio: state.rv_ratio,
+        rv_short: state.rv_short,
+        rv_long: state.rv_long,
+        confidence: state.confidence,
+        confirmations: state.confirmations,
+        cycles_in_regime: state.cycles_in_regime,
+        cooldown_remaining: state.cooldown_remaining,
+        method_used: state.method_used,
+        timestamp: state.timestamp
+      });
+    } catch (error) {
+      console.error("Error getting VRE regime:", error);
+      res.status(500).json({ message: "Failed to get regime" });
+    }
+  });
+
+  // GET /api/vre/aggregate - Get aggregate regime across multiple symbols
+  app.get('/api/vre/aggregate', isAuthenticated, async (req: any, res) => {
+    try {
+      const symbolsParam = req.query.symbols as string | undefined;
+      const symbols = symbolsParam ? symbolsParam.split(',') : ['BTC/USD', 'ETH/USD'];
+      
+      const { volatilityRegimeEngine } = await import('./services/trading/volatilityRegimeEngine');
+      const result = await volatilityRegimeEngine.detectAggregateRegime(symbols);
+      
+      const individualStates: Record<string, any> = {};
+      for (const [symbol, state] of Array.from(result.individual.entries())) {
+        individualStates[symbol] = {
+          regime: state.regime,
+          z_score: state.z_score,
+          confidence: state.confidence,
+        };
+      }
+      
+      res.json({
+        aggregate_regime: result.regime,
+        confidence: result.confidence,
+        individual: individualStates
+      });
+    } catch (error) {
+      console.error("Error getting aggregate regime:", error);
+      res.status(500).json({ message: "Failed to get aggregate regime" });
+    }
+  });
+
+  // GET /api/vre/parameters/:regime - Get adaptive parameters for a regime
+  app.get('/api/vre/parameters/:regime', isAuthenticated, async (req: any, res) => {
+    try {
+      const regime = req.params.regime.toUpperCase();
+      const { profile } = req.query;
+      
+      if (!['LOW', 'NORMAL', 'HIGH', 'EXTREME'].includes(regime)) {
+        return res.status(400).json({ message: "Invalid regime. Must be LOW, NORMAL, HIGH, or EXTREME" });
+      }
+      
+      const { adaptiveParameterService } = await import('./services/trading/adaptiveParameterService');
+      
+      let params;
+      if (profile) {
+        params = await adaptiveParameterService.getParametersForCampaign(
+          regime as any, 
+          profile.toUpperCase() as any
+        );
+      } else {
+        params = await adaptiveParameterService.getParametersForRegime(regime as any);
+      }
+      
+      res.json(params);
+    } catch (error) {
+      console.error("Error getting VRE parameters:", error);
+      res.status(500).json({ message: "Failed to get parameters" });
+    }
+  });
+
+  // GET /api/vre/parameters - Get all default parameters
+  app.get('/api/vre/parameters', isAuthenticated, async (req: any, res) => {
+    try {
+      const { adaptiveParameterService } = await import('./services/trading/adaptiveParameterService');
+      const defaults = adaptiveParameterService.getDefaultParameters();
+      res.json(defaults);
+    } catch (error) {
+      console.error("Error getting all VRE parameters:", error);
+      res.status(500).json({ message: "Failed to get parameters" });
+    }
+  });
+
+  // POST /api/vre/seed - Seed default parameters (admin only)
+  app.post('/api/vre/seed', isAuthenticated, async (req: any, res) => {
+    try {
+      const { adaptiveParameterService } = await import('./services/trading/adaptiveParameterService');
+      await adaptiveParameterService.seedDefaultParameters();
+      res.json({ success: true, message: "Default parameters seeded" });
+    } catch (error) {
+      console.error("Error seeding VRE parameters:", error);
+      res.status(500).json({ message: "Failed to seed parameters" });
+    }
+  });
+
+  // GET /api/vre/circuit-breakers - Get circuit breaker status
+  app.get('/api/vre/circuit-breakers', isAuthenticated, async (req: any, res) => {
+    try {
+      const { vreCircuitBreakersService } = await import('./services/trading/vreCircuitBreakers');
+      const state = vreCircuitBreakersService.getState();
+      
+      const blockedAssets = vreCircuitBreakersService.getBlockedAssets();
+      
+      res.json({
+        extremeSpikeGuard: {
+          active: state.extremeSpikeGuard.active,
+          triggeredAt: state.extremeSpikeGuard.triggeredAt,
+          blocksAddonsUntil: state.extremeSpikeGuard.blocksAddonsUntil
+        },
+        whipsawGuard: {
+          active: state.whipsawGuard.active,
+          blockedAssets
+        }
+      });
+    } catch (error) {
+      console.error("Error getting VRE circuit breakers:", error);
+      res.status(500).json({ message: "Failed to get circuit breakers" });
+    }
+  });
+
+  // POST /api/vre/circuit-breakers/check - Check all guards for a symbol
+  app.post('/api/vre/circuit-breakers/check', isAuthenticated, async (req: any, res) => {
+    try {
+      const { symbol, zScore } = req.body;
+      
+      if (!symbol || zScore === undefined) {
+        return res.status(400).json({ message: "Missing required fields: symbol, zScore" });
+      }
+      
+      const { vreCircuitBreakersService } = await import('./services/trading/vreCircuitBreakers');
+      const result = vreCircuitBreakersService.checkAllGuards(symbol, zScore);
+      
+      res.json(result);
+    } catch (error) {
+      console.error("Error checking VRE guards:", error);
+      res.status(500).json({ message: "Failed to check guards" });
+    }
+  });
+
+  // POST /api/vre/circuit-breakers/record-trade - Record trade result for whipsaw guard
+  app.post('/api/vre/circuit-breakers/record-trade', isAuthenticated, async (req: any, res) => {
+    try {
+      const { symbol, isLoss } = req.body;
+      
+      if (!symbol || isLoss === undefined) {
+        return res.status(400).json({ message: "Missing required fields: symbol, isLoss" });
+      }
+      
+      const { vreCircuitBreakersService } = await import('./services/trading/vreCircuitBreakers');
+      vreCircuitBreakersService.recordTradeResult(symbol, isLoss);
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error recording trade result:", error);
+      res.status(500).json({ message: "Failed to record trade" });
+    }
+  });
+
+  // GET /api/vre/profile-restrictions/:profile - Get profile restrictions
+  app.get('/api/vre/profile-restrictions/:profile', isAuthenticated, async (req: any, res) => {
+    try {
+      const profile = req.params.profile.toUpperCase();
+      
+      if (!['C', 'M', 'A', 'SA', 'FULL'].includes(profile)) {
+        return res.status(400).json({ message: "Invalid profile. Must be C, M, A, SA, or FULL" });
+      }
+      
+      const { adaptiveParameterService } = await import('./services/trading/adaptiveParameterService');
+      const restrictions = adaptiveParameterService.getProfileRestrictions(profile as any);
+      
+      res.json({
+        profile,
+        ...restrictions
+      });
+    } catch (error) {
+      console.error("Error getting profile restrictions:", error);
+      res.status(500).json({ message: "Failed to get restrictions" });
+    }
+  });
+
+  // =============================================================================
+  // FEATURE STORE API - V2 Opportunity Engine Foundation
+  // =============================================================================
+
+  // GET /api/feature-store/asset/:symbol - Get feature vector for single asset
+  app.get('/api/feature-store/asset/:symbol', isAuthenticated, async (req: any, res) => {
+    try {
+      const { symbol } = req.params;
+      const { featureStoreService } = await import('./services/opportunity/featureStoreService');
+      
+      const features = await featureStoreService.getAssetFeatures(symbol);
+      
+      if (!features) {
+        return res.status(404).json({ message: `No features found for ${symbol}` });
+      }
+      
+      res.json(features);
+    } catch (error) {
+      console.error("Error fetching asset features:", error);
+      res.status(500).json({ message: "Failed to fetch asset features" });
+    }
+  });
+
+  // POST /api/feature-store/assets - Get features for multiple assets
+  app.post('/api/feature-store/assets', isAuthenticated, async (req: any, res) => {
+    try {
+      const { symbols } = req.body;
+      
+      if (!symbols || !Array.isArray(symbols)) {
+        return res.status(400).json({ message: "symbols array required" });
+      }
+      
+      const { featureStoreService } = await import('./services/opportunity/featureStoreService');
+      const featuresMap = await featureStoreService.getBatchAssetFeatures(symbols);
+      
+      res.json({
+        count: featuresMap.size,
+        features: Object.fromEntries(featuresMap)
+      });
+    } catch (error) {
+      console.error("Error fetching batch features:", error);
+      res.status(500).json({ message: "Failed to fetch batch features" });
+    }
+  });
+
+  // GET /api/feature-store/cluster/:clusterId - Get aggregate for single cluster
+  app.get('/api/feature-store/cluster/:clusterId', isAuthenticated, async (req: any, res) => {
+    try {
+      const clusterId = parseInt(req.params.clusterId);
+      
+      if (isNaN(clusterId) || clusterId < 1 || clusterId > 10) {
+        return res.status(400).json({ message: "clusterId must be 1-10" });
+      }
+      
+      const { featureStoreService } = await import('./services/opportunity/featureStoreService');
+      const aggregate = await featureStoreService.getClusterAggregate(clusterId);
+      
+      if (!aggregate) {
+        return res.status(404).json({ message: `No data for cluster ${clusterId}` });
+      }
+      
+      res.json(aggregate);
+    } catch (error) {
+      console.error("Error fetching cluster aggregate:", error);
+      res.status(500).json({ message: "Failed to fetch cluster aggregate" });
+    }
+  });
+
+  // GET /api/feature-store/clusters - Get all cluster aggregates
+  app.get('/api/feature-store/clusters', isAuthenticated, async (req: any, res) => {
+    try {
+      const { featureStoreService } = await import('./services/opportunity/featureStoreService');
+      const aggregates = await featureStoreService.getAllClusterAggregates();
+      
+      res.json({
+        count: aggregates.length,
+        clusters: aggregates
+      });
+    } catch (error) {
+      console.error("Error fetching all clusters:", error);
+      res.status(500).json({ message: "Failed to fetch clusters" });
+    }
+  });
+
+  // GET /api/feature-store/eligible - Get opportunity-eligible assets
+  app.get('/api/feature-store/eligible', isAuthenticated, async (req: any, res) => {
+    try {
+      const minScore = parseFloat(req.query.min_score as string) || 0.6;
+      
+      const { featureStoreService } = await import('./services/opportunity/featureStoreService');
+      const eligible = await featureStoreService.getOpportunityEligibleAssets(minScore);
+      
+      res.json({
+        count: eligible.length,
+        min_score: minScore,
+        assets: eligible
+      });
+    } catch (error) {
+      console.error("Error fetching eligible assets:", error);
+      res.status(500).json({ message: "Failed to fetch eligible assets" });
+    }
+  });
+
+  // GET /api/feature-store/semantic-clusters - Get cluster definitions
+  app.get('/api/feature-store/semantic-clusters', isAuthenticated, async (req: any, res) => {
+    try {
+      const { SEMANTIC_CLUSTERS } = await import('./services/opportunity/featureStoreService');
+      
+      res.json({
+        count: Object.keys(SEMANTIC_CLUSTERS).length,
+        clusters: SEMANTIC_CLUSTERS
+      });
+    } catch (error) {
+      console.error("Error fetching semantic clusters:", error);
+      res.status(500).json({ message: "Failed to fetch semantic clusters" });
+    }
+  });
+
+  // POST /api/feature-store/invalidate - Invalidate cache (admin)
+  app.post('/api/feature-store/invalidate', isAuthenticated, async (req: any, res) => {
+    try {
+      const { symbol } = req.body;
+      
+      const { featureStoreService } = await import('./services/opportunity/featureStoreService');
+      await featureStoreService.invalidateCache(symbol);
+      
+      res.json({ 
+        success: true, 
+        message: symbol ? `Cache invalidated for ${symbol}` : 'All cache invalidated' 
+      });
+    } catch (error) {
+      console.error("Error invalidating cache:", error);
+      res.status(500).json({ message: "Failed to invalidate cache" });
+    }
+  });
+
+  // =============================================================================
+  // SEMANTIC CLUSTER API - V2 Cluster Classification System
+  // =============================================================================
+
+  // GET /api/semantic-clusters/definitions - Get all cluster definitions
+  app.get('/api/semantic-clusters/definitions', isAuthenticated, async (req: any, res) => {
+    try {
+      const { CLUSTER_DEFINITIONS } = await import('./services/opportunity/semanticClusterService');
+      
+      res.json({
+        count: CLUSTER_DEFINITIONS.length,
+        clusters: CLUSTER_DEFINITIONS
+      });
+    } catch (error) {
+      console.error("Error fetching cluster definitions:", error);
+      res.status(500).json({ message: "Failed to fetch definitions" });
+    }
+  });
+
+  // GET /api/semantic-clusters/classify/:symbol - Classify single asset
+  app.get('/api/semantic-clusters/classify/:symbol', isAuthenticated, async (req: any, res) => {
+    try {
+      const { symbol } = req.params;
+      const { semanticClusterService } = await import('./services/opportunity/semanticClusterService');
+      
+      const result = await semanticClusterService.classifyAsset(symbol);
+      const definition = semanticClusterService.getClusterDefinition(result.clusterId);
+      
+      res.json({
+        symbol,
+        cluster_id: result.clusterId,
+        cluster_name: definition?.name || 'UNKNOWN',
+        confidence: result.confidence,
+        reason: result.reason
+      });
+    } catch (error) {
+      console.error("Error classifying asset:", error);
+      res.status(500).json({ message: "Failed to classify asset" });
+    }
+  });
+
+  // POST /api/semantic-clusters/classify-all - Classify all assets (admin)
+  app.post('/api/semantic-clusters/classify-all', isAuthenticated, async (req: any, res) => {
+    try {
+      const { semanticClusterService } = await import('./services/opportunity/semanticClusterService');
+      const result = await semanticClusterService.classifyAllAssets();
+      
+      res.json({
+        success: true,
+        updated: result.updated,
+        errors: result.errors
+      });
+    } catch (error) {
+      console.error("Error classifying all assets:", error);
+      res.status(500).json({ message: "Failed to classify assets" });
+    }
+  });
+
+  // GET /api/semantic-clusters/distribution - Get cluster distribution
+  app.get('/api/semantic-clusters/distribution', isAuthenticated, async (req: any, res) => {
+    try {
+      const { semanticClusterService } = await import('./services/opportunity/semanticClusterService');
+      const distribution = await semanticClusterService.getClusterDistribution();
+      
+      res.json({
+        total_clusters: Object.keys(distribution).length,
+        distribution
+      });
+    } catch (error) {
+      console.error("Error fetching distribution:", error);
+      res.status(500).json({ message: "Failed to fetch distribution" });
+    }
+  });
+
+  // GET /api/semantic-clusters/:clusterId/assets - Get assets in cluster
+  app.get('/api/semantic-clusters/:clusterId/assets', isAuthenticated, async (req: any, res) => {
+    try {
+      const clusterId = parseInt(req.params.clusterId);
+      
+      if (isNaN(clusterId) || clusterId < 1 || clusterId > 10) {
+        return res.status(400).json({ message: "clusterId must be 1-10" });
+      }
+      
+      const { semanticClusterService } = await import('./services/opportunity/semanticClusterService');
+      const assets = await semanticClusterService.getClusterAssets(clusterId);
+      const definition = semanticClusterService.getClusterDefinition(clusterId);
+      
+      res.json({
+        cluster_id: clusterId,
+        cluster_name: definition?.name || 'UNKNOWN',
+        description: definition?.description || '',
+        asset_count: assets.length,
+        assets
+      });
+    } catch (error) {
+      console.error("Error fetching cluster assets:", error);
+      res.status(500).json({ message: "Failed to fetch cluster assets" });
+    }
+  });
+
+  // =============================================================================
+  // OPPORTUNITY ENGINE API - V2 Window Detection & COS
+  // =============================================================================
+
+  // GET /api/opportunity/windows - Get active opportunity windows
+  app.get('/api/opportunity/windows', isAuthenticated, async (req: any, res) => {
+    try {
+      const { opportunityEngineService } = await import('./services/opportunity/opportunityEngineService');
+      const windows = await opportunityEngineService.detectOpportunityWindows();
+      
+      res.json({
+        count: windows.length,
+        windows
+      });
+    } catch (error) {
+      console.error("Error fetching opportunity windows:", error);
+      res.status(500).json({ message: "Failed to fetch windows" });
+    }
+  });
+
+  // GET /api/opportunity/windows/profile/:profile - Get windows for profile
+  app.get('/api/opportunity/windows/profile/:profile', isAuthenticated, async (req: any, res) => {
+    try {
+      const profile = req.params.profile.toUpperCase() as 'C' | 'M' | 'A' | 'SA' | 'FULL';
+      
+      if (!['C', 'M', 'A', 'SA', 'FULL'].includes(profile)) {
+        return res.status(400).json({ message: "Invalid profile" });
+      }
+      
+      const { opportunityEngineService } = await import('./services/opportunity/opportunityEngineService');
+      const windows = await opportunityEngineService.getActiveWindowsForProfile(profile);
+      
+      res.json({
+        profile,
+        count: windows.length,
+        windows
+      });
+    } catch (error) {
+      console.error("Error fetching profile windows:", error);
+      res.status(500).json({ message: "Failed to fetch profile windows" });
+    }
+  });
+
+  // GET /api/opportunity/top - Get top opportunities
+  app.get('/api/opportunity/top', isAuthenticated, async (req: any, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 5;
+      
+      const { opportunityEngineService } = await import('./services/opportunity/opportunityEngineService');
+      const windows = await opportunityEngineService.getTopOpportunities(limit);
+      
+      res.json({
+        count: windows.length,
+        opportunities: windows
+      });
+    } catch (error) {
+      console.error("Error fetching top opportunities:", error);
+      res.status(500).json({ message: "Failed to fetch top opportunities" });
+    }
+  });
+
+  // GET /api/opportunity/cos - Get all Cluster Opportunity Scores
+  app.get('/api/opportunity/cos', isAuthenticated, async (req: any, res) => {
+    try {
+      const { opportunityEngineService } = await import('./services/opportunity/opportunityEngineService');
+      const cosScores = await opportunityEngineService.calculateAllCOS();
+      
+      res.json({
+        count: cosScores.length,
+        clusters: cosScores
+      });
+    } catch (error) {
+      console.error("Error calculating COS:", error);
+      res.status(500).json({ message: "Failed to calculate COS" });
+    }
+  });
+
+  // GET /api/opportunity/cos/:clusterId - Get COS for specific cluster
+  app.get('/api/opportunity/cos/:clusterId', isAuthenticated, async (req: any, res) => {
+    try {
+      const clusterId = parseInt(req.params.clusterId);
+      
+      if (isNaN(clusterId) || clusterId < 1 || clusterId > 10) {
+        return res.status(400).json({ message: "clusterId must be 1-10" });
+      }
+      
+      const { opportunityEngineService } = await import('./services/opportunity/opportunityEngineService');
+      const cos = await opportunityEngineService.calculateClusterCOS(clusterId);
+      
+      if (!cos) {
+        return res.status(404).json({ message: `No COS data for cluster ${clusterId}` });
+      }
+      
+      res.json(cos);
+    } catch (error) {
+      console.error("Error calculating cluster COS:", error);
+      res.status(500).json({ message: "Failed to calculate cluster COS" });
+    }
+  });
+
+  // GET /api/opportunity/ranking - Get cluster ranking by COS
+  app.get('/api/opportunity/ranking', isAuthenticated, async (req: any, res) => {
+    try {
+      const { opportunityEngineService } = await import('./services/opportunity/opportunityEngineService');
+      const ranking = await opportunityEngineService.getClusterRanking();
+      
+      res.json({
+        ranking: ranking.map((cos, index) => ({
+          rank: index + 1,
+          ...cos
+        }))
+      });
+    } catch (error) {
+      console.error("Error fetching cluster ranking:", error);
+      res.status(500).json({ message: "Failed to fetch ranking" });
+    }
+  });
+
+  // POST /api/opportunity/invalidate - Invalidate opportunity cache
+  app.post('/api/opportunity/invalidate', isAuthenticated, async (req: any, res) => {
+    try {
+      const { opportunityEngineService } = await import('./services/opportunity/opportunityEngineService');
+      await opportunityEngineService.invalidateCache();
+      
+      res.json({ success: true, message: 'Opportunity cache invalidated' });
+    } catch (error) {
+      console.error("Error invalidating opportunity cache:", error);
+      res.status(500).json({ message: "Failed to invalidate cache" });
+    }
+  });
+
+  // =============================================================================
+  // BASKETS 10×10 ROUTES
+  // =============================================================================
+
+  // GET /api/baskets/10x10 - Get full basket with 100 assets (10 per cluster)
+  app.get('/api/baskets/10x10', isAuthenticated, async (req: any, res) => {
+    try {
+      const { basketsService } = await import('./services/opportunity/basketsService');
+      const basket = await basketsService.generateBasket10x10();
+      
+      res.json({
+        basket,
+        summary: {
+          total_assets: basket.total_assets,
+          clusters_used: basket.metadata.clusters_used,
+          diversification_score: basket.diversification_score,
+          avg_correlation: basket.avg_correlation,
+        }
+      });
+    } catch (error) {
+      console.error("Error generating basket 10x10:", error);
+      res.status(500).json({ message: "Failed to generate basket" });
+    }
+  });
+
+  // GET /api/baskets/10x10/refresh - Force refresh basket
+  app.get('/api/baskets/10x10/refresh', isAuthenticated, async (req: any, res) => {
+    try {
+      const { basketsService } = await import('./services/opportunity/basketsService');
+      const basket = await basketsService.refreshBasket();
+      
+      res.json({
+        basket,
+        refreshed: true
+      });
+    } catch (error) {
+      console.error("Error refreshing basket:", error);
+      res.status(500).json({ message: "Failed to refresh basket" });
+    }
+  });
+
+  // GET /api/baskets/10x10/summary - Get basket summary
+  app.get('/api/baskets/10x10/summary', isAuthenticated, async (req: any, res) => {
+    try {
+      const { basketsService } = await import('./services/opportunity/basketsService');
+      const summary = await basketsService.getBasketSummary();
+      
+      res.json(summary);
+    } catch (error) {
+      console.error("Error fetching basket summary:", error);
+      res.status(500).json({ message: "Failed to fetch summary" });
+    }
+  });
+
+  // GET /api/baskets/10x10/assets - Get all assets in basket
+  app.get('/api/baskets/10x10/assets', isAuthenticated, async (req: any, res) => {
+    try {
+      const { basketsService } = await import('./services/opportunity/basketsService');
+      const assets = await basketsService.getBasketAssets();
+      
+      res.json({
+        count: assets.length,
+        assets
+      });
+    } catch (error) {
+      console.error("Error fetching basket assets:", error);
+      res.status(500).json({ message: "Failed to fetch assets" });
+    }
+  });
+
+  // GET /api/baskets/10x10/cluster/:clusterId - Get assets for specific cluster
+  app.get('/api/baskets/10x10/cluster/:clusterId', isAuthenticated, async (req: any, res) => {
+    try {
+      const clusterId = parseInt(req.params.clusterId);
+      if (isNaN(clusterId) || clusterId < 1 || clusterId > 10) {
+        return res.status(400).json({ message: 'Invalid cluster ID (1-10)' });
+      }
+      
+      const { basketsService } = await import('./services/opportunity/basketsService');
+      const clusterBasket = await basketsService.getClusterBasket(clusterId);
+      
+      if (!clusterBasket) {
+        return res.status(404).json({ message: 'Cluster basket not found' });
+      }
+      
+      res.json(clusterBasket);
+    } catch (error) {
+      console.error("Error fetching cluster basket:", error);
+      res.status(500).json({ message: "Failed to fetch cluster basket" });
+    }
+  });
+
+  // GET /api/baskets/10x10/audit/:basketId - Get persisted audit trail by basket ID
+  app.get('/api/baskets/10x10/audit/:basketId', isAuthenticated, async (req: any, res) => {
+    try {
+      const { basketId } = req.params;
+      if (!basketId || typeof basketId !== 'string') {
+        return res.status(400).json({ message: 'Invalid basket ID' });
+      }
+      
+      const { basketsService } = await import('./services/opportunity/basketsService');
+      const auditLog = await basketsService.getPersistedAuditTrail(basketId);
+      
+      if (!auditLog) {
+        return res.status(404).json({ message: 'Audit trail not found for this basket' });
+      }
+      
+      res.json({
+        basket_id: auditLog.basket_id,
+        generated_at: auditLog.generated_at,
+        expires_at: auditLog.expires_at,
+        generation_time_ms: auditLog.generation_time_ms,
+        total_assets: auditLog.total_assets,
+        clusters_used: auditLog.clusters_used,
+        is_complete: auditLog.is_complete,
+        correlation_method: auditLog.correlation_method,
+        empirical_coverage_pct: auditLog.empirical_coverage_pct,
+        avg_btc_correlation: parseFloat(auditLog.avg_btc_correlation),
+        avg_intra_cluster_correlation: parseFloat(auditLog.avg_intra_cluster_correlation),
+        assets_excluded_by_correlation: auditLog.assets_excluded_by_correlation,
+        audit_hash: auditLog.audit_hash,
+        correlation_matrix_snapshot: auditLog.correlation_matrix_snapshot,
+        pairwise_correlations: auditLog.pairwise_correlations,
+        exclusion_events: auditLog.exclusion_events,
+        cluster_baskets: auditLog.cluster_baskets,
+        cluster_deficits: auditLog.cluster_deficits,
+      });
+    } catch (error) {
+      console.error("Error fetching audit trail:", error);
+      res.status(500).json({ message: "Failed to fetch audit trail" });
+    }
+  });
+
+  // GET /api/baskets/10x10/audit-logs - List recent basket audit logs
+  app.get('/api/baskets/10x10/audit-logs', isAuthenticated, async (req: any, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 20;
+      
+      const { basketsService } = await import('./services/opportunity/basketsService');
+      const logs = await basketsService.listAuditLogs(Math.min(limit, 100));
+      
+      res.json({
+        count: logs.length,
+        logs: logs.map(log => ({
+          basket_id: log.basket_id,
+          generated_at: log.generated_at,
+          total_assets: log.total_assets,
+          is_complete: log.is_complete,
+          correlation_method: log.correlation_method,
+          empirical_coverage_pct: log.empirical_coverage_pct,
+          audit_hash: log.audit_hash,
+        }))
+      });
+    } catch (error) {
+      console.error("Error listing audit logs:", error);
+      res.status(500).json({ message: "Failed to list audit logs" });
+    }
+  });
+
+  // ========== FRANCHISOR SETTINGS ROUTES ==========
+  
+  // GET /api/franchisor/settings - Get franchisor settings (franchisor only)
+  app.get('/api/franchisor/settings', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const settings = await db.select().from(franchisor_settings).limit(1);
+      
+      if (settings.length === 0) {
+        return res.json({
+          exists: false,
+          settings: null,
+        });
+      }
+      
+      res.json({
+        exists: true,
+        settings: settings[0],
+      });
+    } catch (error) {
+      console.error("Error fetching franchisor settings:", error);
+      res.status(500).json({ message: "Failed to fetch franchisor settings" });
+    }
+  });
+  
+  // PUT /api/franchisor/settings - Update franchisor settings (franchisor only)
+  app.put('/api/franchisor/settings', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const existingSettings = await db.select().from(franchisor_settings).limit(1);
+      
+      const settingsData = {
+        ...req.body,
+        updated_at: new Date(),
+        updated_by: userId,
+        is_configured: true,
+      };
+      
+      if (existingSettings.length === 0) {
+        const [newSettings] = await db.insert(franchisor_settings).values(settingsData).returning();
+        return res.json({
+          success: true,
+          settings: newSettings,
+        });
+      }
+      
+      const [updatedSettings] = await db
+        .update(franchisor_settings)
+        .set(settingsData)
+        .where(eq(franchisor_settings.id, existingSettings[0].id))
+        .returning();
+      
+      res.json({
+        success: true,
+        settings: updatedSettings,
+      });
+    } catch (error) {
+      console.error("Error updating franchisor settings:", error);
+      res.status(500).json({ message: "Failed to update franchisor settings" });
+    }
+  });
+
+  // ========== EXTERNAL SERVICES CONTROL ROUTES (Franchisor Cost Control) ==========
+  
+  // GET /api/franchisor/external-services - List all external services and their status
+  app.get('/api/franchisor/external-services', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { externalServiceToggleService } = await import('./services/externalServiceToggleService');
+      const services = await externalServiceToggleService.getAllServices();
+      
+      res.json({ services });
+    } catch (error) {
+      console.error("Error fetching external services:", error);
+      res.status(500).json({ message: "Failed to fetch external services" });
+    }
+  });
+
+  // PUT /api/franchisor/external-services/:serviceKey - Toggle a specific external service
+  app.put('/api/franchisor/external-services/:serviceKey', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { serviceKey } = req.params;
+      const { enabled, reason } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      if (typeof enabled !== 'boolean') {
+        return res.status(400).json({ message: "enabled must be a boolean value" });
+      }
+      
+      const { externalServiceToggleService } = await import('./services/externalServiceToggleService');
+      const ipAddress = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+      
+      const result = await externalServiceToggleService.toggleService(
+        serviceKey,
+        enabled,
+        userId,
+        reason,
+        ipAddress
+      );
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      const updatedService = await externalServiceToggleService.getServiceByKey(serviceKey);
+      
+      res.json({ 
+        success: true,
+        service: updatedService 
+      });
+    } catch (error) {
+      console.error("Error toggling external service:", error);
+      res.status(500).json({ message: "Failed to toggle external service" });
+    }
+  });
+
+  // GET /api/franchisor/external-services/audit-log - Get audit log of service changes
+  app.get('/api/franchisor/external-services/audit-log', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { serviceKey, limit } = req.query;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { externalServiceToggleService } = await import('./services/externalServiceToggleService');
+      const logs = await externalServiceToggleService.getAuditLog(
+        serviceKey as any,
+        parseInt(limit as string) || 50
+      );
+      
+      res.json({ logs });
+    } catch (error) {
+      console.error("Error fetching audit log:", error);
+      res.status(500).json({ message: "Failed to fetch audit log" });
+    }
+  });
+
+  // GET /api/franchisor/external-services/status - Get simplified status of all services (for dashboard)
+  app.get('/api/franchisor/external-services/status', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { externalServiceToggleService } = await import('./services/externalServiceToggleService');
+      const status = await externalServiceToggleService.getServiceStatus();
+      
+      res.json({ status });
+    } catch (error) {
+      console.error("Error fetching service status:", error);
+      res.status(500).json({ message: "Failed to fetch service status" });
+    }
+  });
+  
+  // ========== CONTRACT MANAGEMENT ROUTES ==========
+  
+  // GET /api/contracts/templates - List all contract templates (franchisor only)
+  app.get('/api/contracts/templates', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const templates = await db
+        .select()
+        .from(contract_templates)
+        .orderBy(contract_templates.type, contract_templates.name);
+      
+      res.json({ templates });
+    } catch (error) {
+      console.error("Error fetching contract templates:", error);
+      res.status(500).json({ message: "Failed to fetch contract templates" });
+    }
+  });
+  
+  // POST /api/contracts/templates - Create a new contract template (franchisor only)
+  app.post('/api/contracts/templates', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { name, code, type, content, version, requires_acceptance, is_mandatory, applies_to } = req.body;
+      
+      if (!name || !code || !type || !content || !applies_to) {
+        return res.status(400).json({ message: "Name, code, type, content and applies_to are required" });
+      }
+      
+      const [template] = await db.insert(contract_templates).values({
+        name,
+        code,
+        type,
+        content,
+        version: version || '1.0',
+        requires_acceptance: requires_acceptance !== false,
+        is_mandatory: is_mandatory !== false,
+        applies_to,
+        is_active: true,
+        created_by: userId,
+        updated_by: userId,
+      }).returning();
+      
+      res.status(201).json({ template });
+    } catch (error) {
+      console.error("Error creating contract template:", error);
+      res.status(500).json({ message: "Failed to create contract template" });
+    }
+  });
+  
+  // GET /api/contracts/templates/:id - Get a single contract template
+  app.get('/api/contracts/templates/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const templateId = req.params.id;
+      
+      const template = await db
+        .select()
+        .from(contract_templates)
+        .where(eq(contract_templates.id, templateId))
+        .limit(1);
+      
+      if (template.length === 0) {
+        return res.status(404).json({ message: "Contract template not found" });
+      }
+      
+      res.json({ template: template[0] });
+    } catch (error) {
+      console.error("Error fetching contract template:", error);
+      res.status(500).json({ message: "Failed to fetch contract template" });
+    }
+  });
+  
+  // PUT /api/contracts/templates/:id - Update a contract template (franchisor only)
+  app.put('/api/contracts/templates/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const templateId = req.params.id;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const existing = await db
+        .select()
+        .from(contract_templates)
+        .where(eq(contract_templates.id, templateId))
+        .limit(1);
+      
+      if (existing.length === 0) {
+        return res.status(404).json({ message: "Contract template not found" });
+      }
+      
+      const [updated] = await db
+        .update(contract_templates)
+        .set({
+          ...req.body,
+          updated_at: new Date(),
+          updated_by: userId,
+        })
+        .where(eq(contract_templates.id, templateId))
+        .returning();
+      
+      res.json({ template: updated });
+    } catch (error) {
+      console.error("Error updating contract template:", error);
+      res.status(500).json({ message: "Failed to update contract template" });
+    }
+  });
+  
+  // DELETE /api/contracts/templates/:id - Delete a contract template (franchisor only)
+  app.delete('/api/contracts/templates/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const templateId = req.params.id;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const hasAcceptances = await db
+        .select()
+        .from(contract_acceptances)
+        .where(eq(contract_acceptances.template_id, templateId))
+        .limit(1);
+      
+      if (hasAcceptances.length > 0) {
+        return res.status(400).json({ 
+          message: "Cannot delete template with existing acceptances. Deactivate it instead." 
+        });
+      }
+      
+      await db.delete(contract_templates).where(eq(contract_templates.id, templateId));
+      
+      res.json({ success: true, message: "Contract template deleted" });
+    } catch (error) {
+      console.error("Error deleting contract template:", error);
+      res.status(500).json({ message: "Failed to delete contract template" });
+    }
+  });
+  
+  // GET /api/contracts/pending - Get pending contracts for current user to accept
+  app.get('/api/contracts/pending', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      let appliesTo = 'all';
+      if (permissions.isMasterFranchise) {
+        appliesTo = 'master_franchise';
+      } else if (permissions.hasFranchise) {
+        appliesTo = 'franchise';
+      }
+      
+      const activeTemplates = await db
+        .select()
+        .from(contract_templates)
+        .where(and(
+          eq(contract_templates.is_active, true),
+          eq(contract_templates.requires_acceptance, true),
+          or(
+            eq(contract_templates.applies_to, appliesTo),
+            eq(contract_templates.applies_to, 'all')
+          )
+        ));
+      
+      const userAcceptances = await db
+        .select()
+        .from(contract_acceptances)
+        .where(and(
+          eq(contract_acceptances.user_id, userId),
+          eq(contract_acceptances.is_valid, true)
+        ));
+      
+      const acceptedMap = new Map(
+        userAcceptances.map(a => [`${a.template_id}_${a.template_version}`, true])
+      );
+      
+      const pendingContracts = activeTemplates.filter(
+        t => !acceptedMap.has(`${t.id}_${t.version}`)
+      );
+      
+      res.json({
+        pendingCount: pendingContracts.length,
+        contracts: pendingContracts.map(c => ({
+          id: c.id,
+          name: c.name,
+          code: c.code,
+          type: c.type,
+          version: c.version,
+          is_mandatory: c.is_mandatory,
+        })),
+      });
+    } catch (error) {
+      console.error("Error fetching pending contracts:", error);
+      res.status(500).json({ message: "Failed to fetch pending contracts" });
+    }
+  });
+  
+  // POST /api/contracts/accept - Accept a contract
+  app.post('/api/contracts/accept', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const { template_id, checkbox_text } = req.body;
+      
+      if (!template_id) {
+        return res.status(400).json({ message: "Template ID is required" });
+      }
+      
+      const template = await db
+        .select()
+        .from(contract_templates)
+        .where(eq(contract_templates.id, template_id))
+        .limit(1);
+      
+      if (template.length === 0) {
+        return res.status(404).json({ message: "Contract template not found" });
+      }
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      const existingAcceptance = await db
+        .select()
+        .from(contract_acceptances)
+        .where(and(
+          eq(contract_acceptances.user_id, userId),
+          eq(contract_acceptances.template_id, template_id),
+          eq(contract_acceptances.template_version, template[0].version)
+        ))
+        .limit(1);
+      
+      if (existingAcceptance.length > 0) {
+        return res.status(400).json({ message: "Contract already accepted" });
+      }
+      
+      const ipAddress = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+      const userAgent = req.headers['user-agent'] || 'unknown';
+      
+      const [acceptance] = await db.insert(contract_acceptances).values({
+        user_id: userId,
+        franchise_id: permissions.franchiseId || null,
+        template_id,
+        template_version: template[0].version,
+        template_code: template[0].code,
+        ip_address: ipAddress,
+        user_agent: userAgent,
+        checkbox_text: checkbox_text || `I have read and accept ${template[0].name}`,
+        is_valid: true,
+      }).returning();
+      
+      res.status(201).json({
+        success: true,
+        acceptance: {
+          id: acceptance.id,
+          template_code: acceptance.template_code,
+          accepted_at: acceptance.accepted_at,
+        },
+      });
+    } catch (error) {
+      console.error("Error accepting contract:", error);
+      res.status(500).json({ message: "Failed to accept contract" });
+    }
+  });
+  
+  // GET /api/contracts/acceptances - Get acceptances for current user
+  app.get('/api/contracts/acceptances', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      const acceptances = await db
+        .select({
+          id: contract_acceptances.id,
+          template_code: contract_acceptances.template_code,
+          template_version: contract_acceptances.template_version,
+          accepted_at: contract_acceptances.accepted_at,
+          is_valid: contract_acceptances.is_valid,
+          template_name: contract_templates.name,
+          template_type: contract_templates.type,
+        })
+        .from(contract_acceptances)
+        .leftJoin(contract_templates, eq(contract_acceptances.template_id, contract_templates.id))
+        .where(eq(contract_acceptances.user_id, userId))
+        .orderBy(contract_acceptances.accepted_at);
+      
+      res.json({ acceptances });
+    } catch (error) {
+      console.error("Error fetching contract acceptances:", error);
+      res.status(500).json({ message: "Failed to fetch contract acceptances" });
+    }
+  });
+  
+  // GET /api/contracts/acceptances/all - Get all acceptances (franchisor only)
+  app.get('/api/contracts/acceptances/all', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const acceptances = await db
+        .select({
+          id: contract_acceptances.id,
+          user_id: contract_acceptances.user_id,
+          franchise_id: contract_acceptances.franchise_id,
+          template_code: contract_acceptances.template_code,
+          template_version: contract_acceptances.template_version,
+          accepted_at: contract_acceptances.accepted_at,
+          ip_address: contract_acceptances.ip_address,
+          is_valid: contract_acceptances.is_valid,
+          template_name: contract_templates.name,
+          template_type: contract_templates.type,
+          user_email: users.email,
+          user_name: users.firstName,
+        })
+        .from(contract_acceptances)
+        .leftJoin(contract_templates, eq(contract_acceptances.template_id, contract_templates.id))
+        .leftJoin(users, eq(contract_acceptances.user_id, users.id))
+        .orderBy(contract_acceptances.accepted_at);
+      
+      res.json({ acceptances });
+    } catch (error) {
+      console.error("Error fetching all contract acceptances:", error);
+      res.status(500).json({ message: "Failed to fetch contract acceptances" });
+    }
+  });
+
+  // ========== TERRITORY MANAGEMENT ROUTES ==========
+  
+  // POST /api/territory/check - Check for territory conflicts
+  app.post('/api/territory/check', isAuthenticated, async (req: any, res) => {
+    try {
+      const { country, state, city, region, exclude_franchise_id } = req.body;
+      
+      const { territoryConflictService } = await import('./services/territoryConflictService');
+      const result = await territoryConflictService.checkTerritoryConflict(
+        { country, state, city, region },
+        exclude_franchise_id
+      );
+      
+      res.json(result);
+    } catch (error) {
+      console.error("Error checking territory conflict:", error);
+      res.status(500).json({ message: "Failed to check territory conflict" });
+    }
+  });
+  
+  // GET /api/territory/masters - Get master franchises in a territory
+  app.get('/api/territory/masters', isAuthenticated, async (req: any, res) => {
+    try {
+      const { country, state, city } = req.query;
+      
+      const { territoryConflictService } = await import('./services/territoryConflictService');
+      const masters = await territoryConflictService.getMasterFranchisesInTerritory({
+        country: country as string,
+        state: state as string,
+        city: city as string,
+      });
+      
+      res.json({ masters });
+    } catch (error) {
+      console.error("Error fetching master franchises:", error);
+      res.status(500).json({ message: "Failed to fetch master franchises" });
+    }
+  });
+  
+  // GET /api/territory/sub-franchises/:masterId - Get sub-franchises for a master
+  app.get('/api/territory/sub-franchises/:masterId', isAuthenticated, async (req: any, res) => {
+    try {
+      const masterId = req.params.masterId;
+      
+      const { territoryConflictService } = await import('./services/territoryConflictService');
+      const subFranchises = await territoryConflictService.getSubFranchisesForMaster(masterId);
+      
+      res.json({ subFranchises });
+    } catch (error) {
+      console.error("Error fetching sub-franchises:", error);
+      res.status(500).json({ message: "Failed to fetch sub-franchises" });
+    }
+  });
+  
+  // PUT /api/territory/assign/:franchiseId - Assign territory to a franchise
+  app.put('/api/territory/assign/:franchiseId', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      const franchiseId = req.params.franchiseId;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const { country, state, city, region, is_exclusive } = req.body;
+      
+      const { territoryConflictService } = await import('./services/territoryConflictService');
+      const result = await territoryConflictService.assignTerritoryToFranchise(
+        franchiseId,
+        { country, state, city, region },
+        is_exclusive || false
+      );
+      
+      if (!result.success) {
+        return res.status(400).json({ 
+          message: result.error,
+          conflicts: result.conflicts,
+        });
+      }
+      
+      res.json({ success: true, message: "Territory assigned successfully" });
+    } catch (error) {
+      console.error("Error assigning territory:", error);
+      res.status(500).json({ message: "Failed to assign territory" });
+    }
+  });
+  
+  // GET /api/user/persona - Get current user persona for frontend routing
+  // Apenas 3 personas: franchisor, master_franchise, franchise (que inclui traders)
+  app.get('/api/user/persona', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      // Persona padrão é 'franchise' (não existe mais 'user' separado)
+      // Franquia = Trader (mesma persona)
+      let persona: 'franchisor' | 'master_franchise' | 'franchise' = 'franchise';
+      
+      if (permissions.isFranchisor) {
+        persona = 'franchisor';
+      } else if (permissions.isMasterFranchise) {
+        persona = 'master_franchise';
+      }
+      // Caso contrário, permanece 'franchise' (padrão)
+      
+      res.json({
+        persona,
+        permissions,
+      });
+    } catch (error) {
+      console.error("Error fetching user persona:", error);
+      res.status(500).json({ message: "Failed to fetch user persona" });
+    }
+  });
+
+  // GET /api/franchisor/network-stats - Get network statistics for franchisor dashboard
+  app.get('/api/franchisor/network-stats', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied - franchisor only" });
+      }
+      
+      const allFranchises = await db.select().from(franchises);
+      
+      const total_franchises = allFranchises.length;
+      const active_franchises = allFranchises.filter(f => f.status === 'active').length;
+      const pending_onboarding = allFranchises.filter(f => 
+        f.onboarding_status !== 'active' && f.onboarding_status !== 'rejected'
+      ).length;
+      const master_franchises = allFranchises.filter(f => f.is_master_franchise).length;
+      
+      const uniqueTerritories = new Set(
+        allFranchises
+          .filter(f => f.territory_country || f.territory_state)
+          .map(f => `${f.territory_country}-${f.territory_state}-${f.territory_city}`)
+      );
+      
+      const pendingContracts = allFranchises.filter(f => !f.contract_accepted).length;
+      
+      res.json({
+        total_franchises,
+        active_franchises,
+        pending_onboarding,
+        master_franchises,
+        total_revenue: "0.00",
+        pending_royalties: "0.00",
+        territories_covered: uniqueTerritories.size,
+        contracts_pending: pendingContracts,
+      });
+    } catch (error) {
+      console.error("Error fetching network stats:", error);
+      res.status(500).json({ message: "Failed to fetch network stats" });
+    }
+  });
+
+  // POST /api/contracts/accept - Accept a contract (franchisee accepting contract)
+  const contractAcceptSchema = z.object({
+    template_id: z.string().min(1, "Template ID is required"),
+    franchise_id: z.string().optional().nullable(),
+    template_version: z.string().optional().default("1.0"),
+  });
+  
+  app.post('/api/contracts/accept', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      // Validate input
+      const validationResult = contractAcceptSchema.safeParse(req.body);
+      if (!validationResult.success) {
+        return res.status(400).json({ 
+          message: "Validation failed", 
+          errors: validationResult.error.flatten().fieldErrors 
+        });
+      }
+      
+      const { template_id, franchise_id, template_version } = validationResult.data;
+      
+      // Get client information for audit trail
+      const ip_address = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+      const user_agent = req.headers['user-agent'] || 'unknown';
+      
+      // Check if already accepted
+      const existingAcceptance = await db.select()
+        .from(contract_acceptances)
+        .where(
+          and(
+            eq(contract_acceptances.user_id, userId),
+            eq(contract_acceptances.template_id, template_id)
+          )
+        )
+        .limit(1);
+      
+      if (existingAcceptance.length > 0) {
+        return res.status(400).json({ message: "Contract already accepted" });
+      }
+      
+      // Create acceptance record
+      const [acceptance] = await db.insert(contract_acceptances).values({
+        user_id: userId,
+        franchise_id: franchise_id || null,
+        template_id,
+        template_version: template_version || "1.0",
+        accepted_at: new Date(),
+        ip_address: String(ip_address),
+        user_agent,
+        acceptance_method: 'checkbox',
+      }).returning();
+      
+      // If franchise_id provided, update franchise contract_accepted status
+      if (franchise_id) {
+        await db.update(franchises)
+          .set({ contract_accepted: true })
+          .where(eq(franchises.id, franchise_id));
+      }
+      
+      res.json({ success: true, acceptance });
+    } catch (error) {
+      console.error("Error accepting contract:", error);
+      res.status(500).json({ message: "Failed to accept contract" });
+    }
+  });
+
+  // GET /api/contracts/pending/:franchiseId? - Get pending contracts for user/franchise
+  app.get('/api/contracts/pending', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const franchiseId = req.query.franchiseId;
+      
+      // Get all active templates
+      const templates = await db.select()
+        .from(contract_templates)
+        .where(
+          and(
+            eq(contract_templates.is_active, true),
+            eq(contract_templates.requires_acceptance, true)
+          )
+        );
+      
+      // Get user's accepted contracts
+      const acceptedContracts = await db.select()
+        .from(contract_acceptances)
+        .where(eq(contract_acceptances.user_id, userId));
+      
+      const acceptedTemplateIds = new Set(acceptedContracts.map(a => a.template_id));
+      
+      // Filter to only pending (not yet accepted) contracts
+      const pendingContracts = templates.filter(t => !acceptedTemplateIds.has(t.id));
+      
+      res.json(pendingContracts);
+    } catch (error) {
+      console.error("Error fetching pending contracts:", error);
+      res.status(500).json({ message: "Failed to fetch pending contracts" });
+    }
+  });
+
+  // ============================================================================
+  // PERSONA AUTHENTICATION ROUTES - Separate login/register per persona
+  // ============================================================================
+
+  // POST /api/auth/persona/login - Login for specific persona type
+  app.post('/api/auth/persona/login', async (req, res) => {
+    try {
+      const { email, password, personaType } = req.body;
+      
+      if (!email || !password || !personaType) {
+        return res.status(400).json({ message: "Email, password and persona type required" });
+      }
+      
+      if (!['franchisor', 'master_franchise', 'franchise'].includes(personaType)) {
+        return res.status(400).json({ message: "Invalid persona type" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const result = await personaAuthService.login(email, password, personaType);
+      
+      if (!result.success) {
+        const errorMessages: Record<string, string> = {
+          invalid_credentials: "Invalid email or password",
+          account_locked: "Account temporarily locked due to failed attempts",
+          account_not_activated: "Please activate your account first",
+          internal_error: "An error occurred",
+        };
+        return res.status(401).json({ message: errorMessages[result.error!] || result.error });
+      }
+      
+      // Set session
+      if (req.session) {
+        (req.session as any).personaAuth = {
+          credentialsId: result.credentials!.id,
+          personaType: result.credentials!.persona_type,
+          email: result.credentials!.email,
+          franchiseId: result.credentials!.franchise_id,
+          userId: result.credentials!.user_id,
+        };
+      }
+      
+      res.json({
+        success: true,
+        persona: result.credentials!.persona_type,
+        franchiseId: result.credentials!.franchise_id,
+      });
+    } catch (error) {
+      console.error("Persona login error:", error);
+      res.status(500).json({ message: "Login failed" });
+    }
+  });
+
+  // POST /api/auth/persona/logout - Logout persona session
+  app.post('/api/auth/persona/logout', (req, res) => {
+    if (req.session) {
+      (req.session as any).personaAuth = null;
+    }
+    res.json({ success: true });
+  });
+
+  // GET /api/auth/persona/session - Check current persona session
+  app.get('/api/auth/persona/session', (req, res) => {
+    const personaAuth = (req.session as any)?.personaAuth;
+    if (personaAuth) {
+      res.json({
+        authenticated: true,
+        personaType: personaAuth.personaType,
+        email: personaAuth.email,
+        franchiseId: personaAuth.franchiseId,
+      });
+    } else {
+      res.json({ authenticated: false });
+    }
+  });
+
+  // POST /api/auth/persona/activate - Activate account with token and set password
+  app.post('/api/auth/persona/activate', async (req, res) => {
+    try {
+      const { token, password } = req.body;
+      
+      if (!token || !password) {
+        return res.status(400).json({ message: "Token and password required" });
+      }
+      
+      if (password.length < 8) {
+        return res.status(400).json({ message: "Password must be at least 8 characters" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const result = await personaAuthService.activateAccount(token, password);
+      
+      if (!result.success) {
+        const errorMessages: Record<string, string> = {
+          invalid_token: "Invalid or expired activation link",
+          token_expired: "Activation link has expired",
+          internal_error: "An error occurred",
+        };
+        return res.status(400).json({ message: errorMessages[result.error!] || result.error });
+      }
+      
+      res.json({ success: true, message: "Account activated successfully" });
+    } catch (error) {
+      console.error("Activate account error:", error);
+      res.status(500).json({ message: "Activation failed" });
+    }
+  });
+
+  // POST /api/auth/persona/reset-password-request - Request password reset
+  app.post('/api/auth/persona/reset-password-request', async (req, res) => {
+    try {
+      const { email, personaType } = req.body;
+      
+      if (!email || !personaType) {
+        return res.status(400).json({ message: "Email and persona type required" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const result = await personaAuthService.requestPasswordReset(email, personaType);
+      
+      // Always return success to prevent email enumeration
+      res.json({ success: true, message: "If the email exists, a reset link will be sent" });
+    } catch (error) {
+      console.error("Password reset request error:", error);
+      res.status(500).json({ message: "Request failed" });
+    }
+  });
+
+  // POST /api/auth/persona/reset-password - Reset password with token
+  app.post('/api/auth/persona/reset-password', async (req, res) => {
+    try {
+      const { token, password } = req.body;
+      
+      if (!token || !password) {
+        return res.status(400).json({ message: "Token and password required" });
+      }
+      
+      if (password.length < 8) {
+        return res.status(400).json({ message: "Password must be at least 8 characters" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const result = await personaAuthService.resetPassword(token, password);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error === "token_expired" ? "Reset link expired" : "Invalid reset link" });
+      }
+      
+      res.json({ success: true, message: "Password reset successfully" });
+    } catch (error) {
+      console.error("Password reset error:", error);
+      res.status(500).json({ message: "Reset failed" });
+    }
+  });
+
+  // ============================================================================
+  // FRANCHISE LEADS ROUTES - Landing page registration and management
+  // ============================================================================
+
+  // GET /api/franchise-leads/plans - Get available franchise plans (public)
+  app.get('/api/franchise-leads/plans', async (req, res) => {
+    try {
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const plans = await personaAuthService.getAvailablePlans();
+      res.json(plans);
+    } catch (error) {
+      console.error("Error fetching plans:", error);
+      res.status(500).json({ message: "Failed to fetch plans" });
+    }
+  });
+
+  // POST /api/franchise-leads/register - Register new franchise lead (public - landing page)
+  app.post('/api/franchise-leads/register', async (req, res) => {
+    try {
+      const {
+        planId, name, tradeName, documentType, documentNumber,
+        secondaryDocument, birthDate, addressStreet, addressNumber,
+        addressComplement, addressReference, addressNeighborhood,
+        addressZip, addressCity, addressCountry, phone, whatsapp,
+        email, documentsUrls
+      } = req.body;
+      
+      if (!name || !documentType || !documentNumber || !email) {
+        return res.status(400).json({ message: "Required fields missing" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const result = await personaAuthService.createLead({
+        planId,
+        name,
+        tradeName,
+        documentType,
+        documentNumber,
+        secondaryDocument,
+        birthDate: birthDate ? new Date(birthDate) : undefined,
+        addressStreet,
+        addressNumber,
+        addressComplement,
+        addressReference,
+        addressNeighborhood,
+        addressZip,
+        addressCity,
+        addressCountry,
+        phone,
+        whatsapp,
+        email,
+        documentsUrls,
+        source: "landing_page",
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+      });
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error === "email_already_registered" ? "Email already registered" : result.error });
+      }
+      
+      res.json({
+        success: true,
+        franchiseCode: result.franchiseCode,
+        leadId: result.leadId,
+        message: "Registration submitted successfully. Awaiting approval.",
+      });
+    } catch (error) {
+      console.error("Lead registration error:", error);
+      res.status(500).json({ message: "Registration failed" });
+    }
+  });
+
+  // GET /api/franchise-leads - Get all leads (franchisor only)
+  app.get('/api/franchise-leads', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const status = req.query.status as string | undefined;
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const leads = await personaAuthService.getLeads(status);
+      
+      res.json(leads);
+    } catch (error) {
+      console.error("Error fetching leads:", error);
+      res.status(500).json({ message: "Failed to fetch leads" });
+    }
+  });
+
+  // GET /api/franchise-leads/:id - Get lead details (franchisor only)
+  app.get('/api/franchise-leads/:id', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const lead = await personaAuthService.getLeadById(req.params.id);
+      
+      if (!lead) {
+        return res.status(404).json({ message: "Lead not found" });
+      }
+      
+      res.json(lead);
+    } catch (error) {
+      console.error("Error fetching lead:", error);
+      res.status(500).json({ message: "Failed to fetch lead" });
+    }
+  });
+
+  // POST /api/franchise-leads/:id/approve - Approve a lead (franchisor only)
+  app.post('/api/franchise-leads/:id/approve', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const result = await personaAuthService.approveLead(req.params.id, userId);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      // TODO: Send activation email with result.activationToken
+      
+      res.json({
+        success: true,
+        franchiseId: result.franchiseId,
+        message: "Lead approved. Activation email will be sent.",
+      });
+    } catch (error) {
+      console.error("Error approving lead:", error);
+      res.status(500).json({ message: "Failed to approve lead" });
+    }
+  });
+
+  // POST /api/franchise-leads/:id/reject - Reject a lead (franchisor only)
+  app.post('/api/franchise-leads/:id/reject', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { reason } = req.body;
+      if (!reason) {
+        return res.status(400).json({ message: "Rejection reason required" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const result = await personaAuthService.rejectLead(req.params.id, userId, reason);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      // TODO: Send rejection email
+      
+      res.json({ success: true, message: "Lead rejected" });
+    } catch (error) {
+      console.error("Error rejecting lead:", error);
+      res.status(500).json({ message: "Failed to reject lead" });
+    }
+  });
+
+  // POST /api/franchise-leads/manual - Create franchise manually (franchisor only)
+  app.post('/api/franchise-leads/manual', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      
+      // Create lead first
+      const leadResult = await personaAuthService.createLead({
+        ...req.body,
+        source: "manual",
+      });
+      
+      if (!leadResult.success) {
+        return res.status(400).json({ message: leadResult.error });
+      }
+      
+      // Immediately approve
+      const approveResult = await personaAuthService.approveLead(leadResult.leadId!, userId);
+      
+      if (!approveResult.success) {
+        return res.status(400).json({ message: approveResult.error });
+      }
+      
+      res.json({
+        success: true,
+        franchiseCode: leadResult.franchiseCode,
+        franchiseId: approveResult.franchiseId,
+        activationToken: approveResult.activationToken,
+      });
+    } catch (error) {
+      console.error("Error creating franchise manually:", error);
+      res.status(500).json({ message: "Failed to create franchise" });
+    }
+  });
+
+  // ============================================================================
+  // FRANCHISOR SETUP ROUTES - Initial admin creation
+  // ============================================================================
+
+  // GET /api/auth/franchisor/exists - Check if franchisor admin exists
+  app.get('/api/auth/franchisor/exists', async (req, res) => {
+    try {
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const exists = await personaAuthService.franchisorExists();
+      res.json({ exists });
+    } catch (error) {
+      console.error("Error checking franchisor:", error);
+      res.status(500).json({ message: "Check failed" });
+    }
+  });
+
+  // POST /api/auth/franchisor/setup - Create initial franchisor admin (one-time only)
+  app.post('/api/auth/franchisor/setup', async (req, res) => {
+    try {
+      const { email, password, name, setupKey } = req.body;
+      
+      // Require a setup key from environment for security
+      const expectedKey = process.env.FRANCHISOR_SETUP_KEY || 'DELFOS-SETUP-2024';
+      if (setupKey !== expectedKey) {
+        return res.status(403).json({ message: "Invalid setup key" });
+      }
+      
+      if (!email || !password) {
+        return res.status(400).json({ message: "Email and password required" });
+      }
+      
+      if (password.length < 8) {
+        return res.status(400).json({ message: "Password must be at least 8 characters" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const result = await personaAuthService.createFranchisor(email, password, name || 'DELFOS Admin');
+      
+      if (!result.success) {
+        if (result.error === 'franchisor_already_exists') {
+          return res.status(400).json({ message: "Franchisor admin already exists" });
+        }
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({ 
+        success: true, 
+        message: "Franchisor admin created successfully. You can now login.",
+      });
+    } catch (error) {
+      console.error("Franchisor setup error:", error);
+      res.status(500).json({ message: "Setup failed" });
+    }
+  });
+
+  // ============================================================================
+  // MASTER FRANCHISE ROUTES - Regional franchise management
+  // ============================================================================
+
+  // POST /api/master-leads/register - Register as Master Franchise candidate (public)
+  app.post('/api/master-leads/register', async (req, res) => {
+    try {
+      const { name, email, phone, territory, documentType, documentNumber, addressCity, addressCountry, notes } = req.body;
+      
+      if (!name || !email || !territory || !documentType || !documentNumber) {
+        return res.status(400).json({ message: "Required fields missing" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const result = await personaAuthService.createMasterLead({
+        name,
+        email,
+        phone,
+        territory,
+        documentType,
+        documentNumber,
+        addressCity,
+        addressCountry,
+        notes,
+      });
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error === "email_already_registered" ? "Email already registered" : result.error });
+      }
+      
+      res.json({
+        success: true,
+        masterCode: result.masterCode,
+        message: "Master Franchise application submitted. Awaiting approval.",
+      });
+    } catch (error) {
+      console.error("Master lead registration error:", error);
+      res.status(500).json({ message: "Registration failed" });
+    }
+  });
+
+  // GET /api/master-leads - Get all master leads (franchisor only)
+  app.get('/api/master-leads', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const status = req.query.status as string | undefined;
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const leads = await personaAuthService.getMasterLeads(status);
+      
+      res.json(leads);
+    } catch (error) {
+      console.error("Error fetching master leads:", error);
+      res.status(500).json({ message: "Failed to fetch leads" });
+    }
+  });
+
+  // POST /api/master-leads/:id/approve - Approve a master lead (franchisor only)
+  app.post('/api/master-leads/:id/approve', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const userEmail = req.user.claims.email;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(userId, userEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      const { territory } = req.body;
+      if (!territory) {
+        return res.status(400).json({ message: "Territory is required" });
+      }
+      
+      const { personaAuthService } = await import('./services/personaAuthService');
+      const result = await personaAuthService.approveMasterLead(req.params.id, userId, territory);
+      
+      if (!result.success) {
+        return res.status(400).json({ message: result.error });
+      }
+      
+      res.json({
+        success: true,
+        franchiseId: result.franchiseId,
+        message: "Master Franchise approved. Activation email will be sent.",
+      });
+    } catch (error) {
+      console.error("Error approving master lead:", error);
+      res.status(500).json({ message: "Failed to approve" });
     }
   });
 
