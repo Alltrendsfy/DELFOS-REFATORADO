@@ -41,7 +41,10 @@ export interface IStorage {
   // Users (Replit Auth)
   getUser(id: string): Promise<User | undefined>;
   getUserById(id: string): Promise<User | undefined>;
+  getUserByEmail(email: string): Promise<User | undefined>;
   upsertUser(user: UpsertUser): Promise<User>;
+  clearPlaceholderEmail(placeholderId: string): Promise<void>;
+  mergePlaceholderUser(placeholderId: string, realUserId: string): Promise<void>;
   updateUserKrakenCredentials(userId: string, apiKey: string | null, apiSecret: string | null): Promise<void>;
   updateUserBetaStatus(userId: string, isApproved: boolean, codeUsed: string | null): Promise<void>;
   
@@ -67,6 +70,9 @@ export interface IStorage {
   
   // Portfolios
   getPortfoliosByUserId(userId: string): Promise<Portfolio[]>;
+  getPortfoliosByFranchiseId(franchiseId: string): Promise<Portfolio[]>;
+  getAllPortfolios(): Promise<Portfolio[]>;
+  getPortfoliosForAccess(options: { isFranchisor: boolean; franchiseId?: string | null }): Promise<Portfolio[]>;
   getPortfolio(id: string): Promise<Portfolio | undefined>;
   createPortfolio(portfolio: InsertPortfolio): Promise<Portfolio>;
   updatePortfolio(id: string, updates: Partial<InsertPortfolio>): Promise<Portfolio | undefined>;
@@ -153,6 +159,9 @@ export interface IStorage {
   // Campaigns
   getCampaignsByPortfolio(portfolioId: string): Promise<Campaign[]>;
   getCampaign(id: string): Promise<Campaign | undefined>;
+  getAllCampaigns(): Promise<Campaign[]>;
+  getCampaignsByFranchiseId(franchiseId: string): Promise<Campaign[]>;
+  getCampaignsForAccess(options: { isFranchisor: boolean; franchiseId?: string | null }): Promise<Campaign[]>;
   createCampaign(campaign: InsertCampaign): Promise<Campaign>;
   updateCampaignEquity(id: string, currentEquity: string): Promise<Campaign>;
   completeCampaign(id: string): Promise<Campaign>;
@@ -244,6 +253,11 @@ export class DbStorage implements IStorage {
     return this.getUser(id);
   }
 
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const [user] = await db.select().from(schema.users).where(eq(schema.users.email, email.toLowerCase()));
+    return user;
+  }
+
   async updateUserKrakenCredentials(userId: string, apiKey: string | null, apiSecret: string | null): Promise<void> {
     await db
       .update(schema.users)
@@ -268,6 +282,59 @@ export class DbStorage implements IStorage {
       })
       .returning();
     return user;
+  }
+
+  async clearPlaceholderEmail(placeholderId: string): Promise<void> {
+    // Clear email from placeholder to avoid unique constraint violation when real user logs in
+    await db.update(schema.users)
+      .set({ email: null, updatedAt: new Date() })
+      .where(eq(schema.users.id, placeholderId));
+  }
+
+  async mergePlaceholderUser(placeholderId: string, realUserId: string): Promise<void> {
+    // This migrates all FK references from a placeholder user to the real user.
+    // The placeholder user was created when inviting someone by email before they logged in.
+    // Now they've logged in, so we need to transfer their franchise memberships to the real account.
+    
+    const updatePromises = [
+      // Core franchise membership - this is the main reason for placeholder users
+      db.update(schema.franchise_users)
+        .set({ user_id: realUserId, updated_at: new Date() })
+        .where(eq(schema.franchise_users.user_id, placeholderId)),
+      
+      // If placeholder user invited others (unlikely but possible)
+      db.update(schema.franchise_users)
+        .set({ invited_by: realUserId, updated_at: new Date() })
+        .where(eq(schema.franchise_users.invited_by, placeholderId)),
+      
+      // Audit trail entries (if any were created during invitation)
+      db.update(schema.audit_trail)
+        .set({ user_id: realUserId })
+        .where(eq(schema.audit_trail.user_id, placeholderId)),
+      
+      // Authorized emails added by placeholder (unlikely but handle it)
+      db.update(schema.authorizedEmails)
+        .set({ added_by: realUserId })
+        .where(eq(schema.authorizedEmails.added_by, placeholderId)),
+      
+      // API tokens (placeholder users wouldn't have these, but be thorough)
+      db.update(schema.apiTokens)
+        .set({ user_id: realUserId })
+        .where(eq(schema.apiTokens.user_id, placeholderId)),
+      
+      db.update(schema.apiTokens)
+        .set({ created_by: realUserId })
+        .where(eq(schema.apiTokens.created_by, placeholderId)),
+    ];
+    
+    // Run all updates in parallel - if any fail, we throw before deleting placeholder
+    await Promise.all(updatePromises);
+    
+    // Only delete placeholder after ALL updates succeed
+    // This ensures we never leave orphaned FK references
+    await db.delete(schema.users).where(eq(schema.users.id, placeholderId));
+    
+    console.log(`[Storage] Merged placeholder user ${placeholderId} into real user ${realUserId}`);
   }
 
   async updateUserBetaStatus(userId: string, isApproved: boolean, codeUsed: string | null): Promise<void> {
@@ -379,6 +446,24 @@ export class DbStorage implements IStorage {
   // ===== PORTFOLIOS =====
   async getPortfoliosByUserId(userId: string): Promise<Portfolio[]> {
     return await db.select().from(schema.portfolios).where(eq(schema.portfolios.user_id, userId));
+  }
+
+  async getPortfoliosByFranchiseId(franchiseId: string): Promise<Portfolio[]> {
+    return await db.select().from(schema.portfolios).where(eq(schema.portfolios.franchise_id, franchiseId));
+  }
+
+  async getAllPortfolios(): Promise<Portfolio[]> {
+    return await db.select().from(schema.portfolios).orderBy(desc(schema.portfolios.created_at));
+  }
+
+  async getPortfoliosForAccess(options: { isFranchisor: boolean; franchiseId?: string | null }): Promise<Portfolio[]> {
+    if (options.isFranchisor) {
+      return this.getAllPortfolios();
+    }
+    if (options.franchiseId) {
+      return this.getPortfoliosByFranchiseId(options.franchiseId);
+    }
+    return [];
   }
 
   async getPortfolio(id: string): Promise<Portfolio | undefined> {
@@ -803,6 +888,31 @@ export class DbStorage implements IStorage {
     const [campaign] = await db.select().from(schema.campaigns)
       .where(eq(schema.campaigns.id, id));
     return campaign;
+  }
+
+  async getAllCampaigns(): Promise<Campaign[]> {
+    return await db.select().from(schema.campaigns)
+      .where(eq(schema.campaigns.is_deleted, false))
+      .orderBy(desc(schema.campaigns.start_date));
+  }
+
+  async getCampaignsByFranchiseId(franchiseId: string): Promise<Campaign[]> {
+    return await db.select().from(schema.campaigns)
+      .where(and(
+        eq(schema.campaigns.franchise_id, franchiseId),
+        eq(schema.campaigns.is_deleted, false)
+      ))
+      .orderBy(desc(schema.campaigns.start_date));
+  }
+
+  async getCampaignsForAccess(options: { isFranchisor: boolean; franchiseId?: string | null }): Promise<Campaign[]> {
+    if (options.isFranchisor) {
+      return this.getAllCampaigns();
+    }
+    if (options.franchiseId) {
+      return this.getCampaignsByFranchiseId(options.franchiseId);
+    }
+    return [];
   }
 
   async createCampaign(insertCampaign: InsertCampaign): Promise<Campaign> {
