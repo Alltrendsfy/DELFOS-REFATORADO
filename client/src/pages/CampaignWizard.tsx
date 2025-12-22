@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,11 +33,14 @@ import {
   TrendingDown,
   AlertCircle,
   BarChart3,
-  RefreshCw
+  RefreshCw,
+  FileText,
+  Brain
 } from "lucide-react";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { RBMSelector } from "@/components/RBMSelector";
 
 interface Portfolio {
   id: string;
@@ -116,6 +119,47 @@ interface RiskProfile {
   max_cluster_risk_pct: string;
 }
 
+interface OpportunityBlueprint {
+  id: string;
+  type: string;
+  regime: string;
+  opportunity_score: number;
+  confidence: string;
+  assets: string[];
+  campaign_parameters: {
+    duration_days?: number;
+    capital_allocation_pct?: number;
+    recommended_capital?: number;
+    max_positions?: number;
+  };
+  risk_parameters: {
+    max_position_size?: number;
+    stop_loss_pct?: number;
+    take_profit_pct?: number;
+    max_drawdown_pct?: number;
+    risk_per_trade_pct?: number;
+  };
+  execution_logic: {
+    entry_conditions?: string[];
+    exit_conditions?: string[];
+    time_constraints?: string;
+  };
+  explanation: {
+    thesis?: string;
+    rationale?: string;
+    historical_evidence?: string;
+    risk_factors?: string[];
+  };
+  status: string;
+  expires_at: string;
+  created_at: string;
+}
+
+interface BlueprintResponse {
+  blueprint: OpportunityBlueprint;
+  integrityValid: boolean;
+}
+
 const STEPS = [
   { id: 1, key: 'basics', icon: Wallet },
   { id: 2, key: 'mode', icon: Zap },
@@ -128,8 +172,22 @@ export default function CampaignWizard() {
   const { t, language } = useLanguage();
   const { toast } = useToast();
   const [, setLocation] = useLocation();
+  const searchString = useSearch();
+  
+  // Extract blueprint ID from URL param - used for querying
+  const blueprintIdFromUrl = useMemo(() => {
+    const params = new URLSearchParams(searchString);
+    return params.get('blueprint');
+  }, [searchString]);
+  
+  // Use ref to capture blueprint ID once at component mount - survives all re-renders and errors
+  const blueprintIdRef = useRef<string | null>(blueprintIdFromUrl);
+  const immutableBlueprintId = blueprintIdRef.current;
   
   const [currentStep, setCurrentStep] = useState(1);
+  const [blueprintApplied, setBlueprintApplied] = useState(false);
+  const [blueprintErrorShown, setBlueprintErrorShown] = useState(false);
+  const [blueprintModeFailed, setBlueprintModeFailed] = useState(false);
   
   const [formData, setFormData] = useState({
     name: '',
@@ -141,7 +199,15 @@ export default function CampaignWizard() {
     investorProfile: 'M',
     maxDrawdown: 10,
     enableCircuitBreakers: true,
+    rbmMultiplier: 1.0,
   });
+
+  const { data: blueprintData, isLoading: blueprintLoading, error: blueprintError } = useQuery<BlueprintResponse>({
+    queryKey: ['/api/opportunity-blueprints', immutableBlueprintId],
+    enabled: !!immutableBlueprintId && !blueprintModeFailed,
+  });
+
+  const blueprint = blueprintData?.blueprint;
 
   const { data: portfolios, isLoading: portfoliosLoading } = useQuery<Portfolio[]>({
     queryKey: ['/api/portfolios'],
@@ -158,6 +224,21 @@ export default function CampaignWizard() {
     queryKey: ['/api/dashboard/market-brief'],
     staleTime: 30000,
     refetchInterval: 60000,
+  });
+
+  // Fetch allowed risk profiles for this user based on their franchise plan
+  interface AllowedRiskProfilesData {
+    allowedProfiles: string[];
+    allowedProfileNames: string[];
+    planCode: string | null;
+    planName: string | null;
+    franchiseId: string | null;
+    isUnrestricted: boolean;
+  }
+  
+  const { data: allowedRiskProfilesData } = useQuery<AllowedRiskProfilesData>({
+    queryKey: ['/api/user/allowed-risk-profiles'],
+    staleTime: 60000,
   });
 
   // Fallback risk profiles in case API fails
@@ -195,6 +276,28 @@ export default function CampaignWizard() {
       tp_atr_multiplier: '3.00',
       max_cluster_risk_pct: '15.00',
     },
+    {
+      id: 'fallback-sa',
+      profile_code: 'SA',
+      profile_name: 'Super Agressivo',
+      risk_per_trade_pct: '2.00',
+      max_drawdown_30d_pct: '30.00',
+      max_open_positions: 30,
+      max_trades_per_day: 100,
+      tp_atr_multiplier: '4.00',
+      max_cluster_risk_pct: '20.00',
+    },
+    {
+      id: 'fallback-f',
+      profile_code: 'F',
+      profile_name: 'Full Custom',
+      risk_per_trade_pct: '2.50',
+      max_drawdown_30d_pct: '40.00',
+      max_open_positions: 40,
+      max_trades_per_day: 150,
+      tp_atr_multiplier: '5.00',
+      max_cluster_risk_pct: '25.00',
+    },
   ];
 
   const { data: riskProfilesData, isLoading: riskProfilesLoading, isError: riskProfilesError } = useQuery<RiskProfile[]>({
@@ -203,8 +306,29 @@ export default function CampaignWizard() {
     staleTime: 60000,
   });
 
+  // Fetch RBM permissions for the current user
+  interface RBMPermissions {
+    canActivateRBM: boolean;
+    canViewRBM: boolean;
+    canSetRBMLimits: boolean;
+    isFranchisor: boolean;
+    hasFranchise: boolean;
+  }
+  
+  const { data: rbmPermissions } = useQuery<RBMPermissions>({
+    queryKey: ['/api/rbm/permissions'],
+    staleTime: 60000,
+  });
+
   // Use API profiles if available, otherwise use fallback
-  const riskProfiles = (riskProfilesData && riskProfilesData.length > 0) ? riskProfilesData : fallbackProfiles;
+  const allRiskProfiles = (riskProfilesData && riskProfilesData.length > 0) ? riskProfilesData : fallbackProfiles;
+  
+  // Filter profiles based on franchise plan restrictions
+  const allowedProfileCodes = allowedRiskProfilesData?.allowedProfiles || ['C', 'M', 'A'];
+  const riskProfiles = allRiskProfiles.filter(p => allowedProfileCodes.includes(p.profile_code));
+  
+  // Check if selected profile is still allowed (in case franchise plan changed)
+  const isProfileRestricted = !allowedProfileCodes.includes(formData.investorProfile);
 
   const selectedProfile = riskProfiles?.find(p => p.profile_code === formData.investorProfile);
 
@@ -384,6 +508,85 @@ export default function CampaignWizard() {
     }
   }, [currentStep]);
 
+  useEffect(() => {
+    if (blueprint && !blueprintApplied) {
+      const campaignParams = blueprint.campaign_parameters || {};
+      const riskParams = blueprint.risk_parameters || {};
+      const explanation = blueprint.explanation || {};
+      
+      const generateBlueprintName = () => {
+        const typeLabels: Record<string, string> = {
+          'CO-01': t('wizard.blueprint.types.statisticalReversion'),
+          'CO-02': t('wizard.blueprint.types.volatilityExpansion'),
+          'CO-03': t('wizard.blueprint.types.sectorMomentum'),
+          'CO-04': t('wizard.blueprint.types.liquidityEvent'),
+          'CO-05': t('wizard.blueprint.types.correlationBreakdown'),
+          'CO-06': t('wizard.blueprint.types.crossAssetDivergence'),
+        };
+        const typeLabel = typeLabels[blueprint.type] || blueprint.type;
+        const date = new Date().toLocaleDateString();
+        return `${typeLabel} - ${date}`;
+      };
+      
+      const mapRegimeToProfile = (regime: string): string => {
+        const mapping: Record<string, string> = {
+          'VOLATILITY_EXPANSION': 'A',
+          'VOLATILITY_CONTRACTION': 'C',
+          'MOMENTUM_BULL': 'M',
+          'MOMENTUM_BEAR': 'M',
+          'MEAN_REVERSION': 'M',
+          'LIQUIDITY_EVENT': 'A',
+          'SECTOR_ROTATION': 'M',
+          'RANGE_BOUND': 'C',
+        };
+        return mapping[regime] || 'M';
+      };
+      
+      setFormData(prev => ({
+        ...prev,
+        name: generateBlueprintName(),
+        initialCapital: campaignParams.recommended_capital?.toString() || prev.initialCapital,
+        duration: campaignParams.duration_days || 14,
+        maxDrawdown: riskParams.max_drawdown_pct || 15,
+        investorProfile: mapRegimeToProfile(blueprint.regime),
+      }));
+      
+      setBlueprintApplied(true);
+      
+      toast({
+        title: t('wizard.blueprint.applied'),
+        description: t('wizard.blueprint.appliedDesc'),
+      });
+    }
+  }, [blueprint, blueprintApplied, t]);
+
+  // Handle blueprint fetch error - exit blueprint mode and continue in standalone mode
+  useEffect(() => {
+    if (blueprintError && immutableBlueprintId && !blueprintErrorShown) {
+      setBlueprintErrorShown(true);
+      // Mark blueprint mode as failed to disable future queries and hide banner
+      setBlueprintModeFailed(true);
+      setBlueprintApplied(false);
+      toast({
+        title: t('common.error'),
+        description: t('wizard.blueprint.loadError') || 'Failed to load blueprint. Continuing without pre-fill.',
+        variant: 'destructive',
+      });
+    }
+  }, [blueprintError, immutableBlueprintId, blueprintErrorShown, t, toast]);
+
+  // Auto-select first allowed profile if current selection is restricted
+  useEffect(() => {
+    if (isProfileRestricted && riskProfiles.length > 0) {
+      const firstAllowed = riskProfiles[0];
+      setFormData(prev => ({
+        ...prev,
+        investorProfile: firstAllowed.profile_code,
+        maxDrawdown: Math.abs(parseFloat(firstAllowed.max_drawdown_30d_pct))
+      }));
+    }
+  }, [isProfileRestricted, riskProfiles]);
+
   const createCampaignMutation = useMutation({
     mutationFn: async (data: any) => {
       const response = await fetch('/api/campaigns', {
@@ -400,10 +603,21 @@ export default function CampaignWizard() {
       
       return await response.json();
     },
-    onSuccess: () => {
+    onSuccess: (data: any) => {
+      // Use blueprint?.id as source of truth, with immutable ref as final fallback
+      const usedBlueprintId = !blueprintModeFailed ? (blueprint?.id || immutableBlueprintId) : null;
+      if (usedBlueprintId && data?.id) {
+        consumeBlueprintMutation.mutate({ 
+          blueprintId: usedBlueprintId, 
+          campaignId: data.id 
+        });
+      }
+      
       toast({ 
         title: t('wizard.success'), 
-        description: t('wizard.campaignCreated')
+        description: usedBlueprintId 
+          ? t('wizard.blueprint.campaignCreated') 
+          : t('wizard.campaignCreated')
       });
       queryClient.invalidateQueries({ queryKey: ['/api/campaigns/all'] });
       setLocation('/campaigns');
@@ -495,6 +709,9 @@ export default function CampaignWizard() {
     const endDate = new Date();
     endDate.setDate(endDate.getDate() + formData.duration);
 
+    // Use blueprint.id as source of truth, with immutable ref as final fallback
+    const effectiveBlueprintId = !blueprintModeFailed ? (blueprint?.id || immutableBlueprintId) : null;
+    
     const campaignData = {
       portfolio_id: formData.portfolioId,
       name: formData.name,
@@ -505,18 +722,43 @@ export default function CampaignWizard() {
       current_equity: formData.initialCapital,
       max_drawdown_percentage: (-formData.maxDrawdown).toString(),
       status: 'active',
+      blueprint_id: effectiveBlueprintId || undefined,
+      blueprint_assets: blueprint?.assets || undefined,
+      rbm_requested: formData.rbmMultiplier.toString(),
+      rbm_approved: formData.rbmMultiplier <= 1.0 ? '1.0' : null,
+      rbm_status: formData.rbmMultiplier > 1.0 ? 'PENDING' : 'INACTIVE',
       risk_config: selectedProfile ? {
         ...selectedProfile,
         maxDrawdown: formData.maxDrawdown,
         circuitBreakersEnabled: formData.enableCircuitBreakers,
+        rbmMultiplier: formData.rbmMultiplier,
+        ...(blueprint?.risk_parameters || {}),
       } : {
         maxDrawdown: formData.maxDrawdown,
         circuitBreakersEnabled: formData.enableCircuitBreakers,
+        rbmMultiplier: formData.rbmMultiplier,
+        ...(blueprint?.risk_parameters || {}),
       },
     };
     
     createCampaignMutation.mutate(campaignData);
   };
+
+  const consumeBlueprintMutation = useMutation({
+    mutationFn: async (data: { blueprintId: string; campaignId: string }) => {
+      const response = await fetch(`/api/opportunity-blueprints/${data.blueprintId}/consume`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaign_id: data.campaignId }),
+        credentials: 'include'
+      });
+      if (!response.ok) throw new Error('Failed to consume blueprint');
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/opportunity-blueprints'] });
+    }
+  });
 
   const progressPercentage = ((currentStep - 1) / (STEPS.length - 1)) * 100;
 
@@ -538,16 +780,78 @@ export default function CampaignWizard() {
     }
   };
 
+  // Only show loading skeleton if blueprint is loading AND not failed
+  if (blueprintLoading && !blueprintModeFailed) {
+    return (
+      <div className="container max-w-4xl mx-auto py-8 px-4">
+        <Card>
+          <CardContent className="p-8 flex items-center justify-center">
+            <Loader2 className="w-8 h-8 animate-spin mr-3" />
+            <span>{t('wizard.blueprint.loading')}</span>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="container max-w-4xl mx-auto py-8 px-4">
       <div className="mb-8">
         <h1 className="text-3xl font-bold mb-2" data-testid="text-wizard-title">
-          {t('wizard.title')}
+          {blueprint && !blueprintModeFailed ? t('wizard.blueprint.title') : t('wizard.title')}
         </h1>
         <p className="text-muted-foreground">
-          {t('wizard.subtitle')}
+          {blueprint && !blueprintModeFailed ? t('wizard.blueprint.subtitle') : t('wizard.subtitle')}
         </p>
       </div>
+
+      {blueprint && !blueprintModeFailed && (
+        <Card className="mb-6 border-primary/50 bg-primary/5">
+          <CardHeader className="pb-3">
+            <div className="flex items-center gap-2">
+              <Brain className="w-5 h-5 text-primary" />
+              <CardTitle className="text-lg">{t('wizard.blueprint.aiOpportunity')}</CardTitle>
+              <Badge variant="outline" className="ml-auto bg-green-500/10 text-green-600 border-green-500/30">
+                {blueprint.type}
+              </Badge>
+              <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-500/30">
+                {t('wizard.blueprint.score')}: {blueprint.opportunity_score}%
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div>
+              <p className="text-sm font-medium text-muted-foreground mb-1">{t('wizard.blueprint.thesis')}</p>
+              <p className="text-sm">{blueprint.explanation?.thesis || t('wizard.blueprint.noThesis')}</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-muted-foreground">{t('wizard.blueprint.regime')}:</span>
+                <Badge variant="secondary" className="text-xs">{blueprint.regime}</Badge>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-muted-foreground">{t('wizard.blueprint.assets')}:</span>
+                {blueprint.assets?.slice(0, 3).map((asset: string) => (
+                  <Badge key={asset} variant="outline" className="text-xs">{asset}</Badge>
+                ))}
+                {blueprint.assets?.length > 3 && (
+                  <Badge variant="outline" className="text-xs">+{blueprint.assets.length - 3}</Badge>
+                )}
+              </div>
+            </div>
+            {blueprint.explanation?.rationale && (
+              <div>
+                <p className="text-sm font-medium text-muted-foreground mb-1">{t('wizard.blueprint.rationale')}</p>
+                <p className="text-xs text-muted-foreground">{blueprint.explanation.rationale}</p>
+              </div>
+            )}
+            <div className="text-xs text-muted-foreground flex items-center gap-2">
+              <Calendar className="w-3 h-3" />
+              {t('wizard.blueprint.expiresAt')}: {new Date(blueprint.expires_at).toLocaleString()}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="mb-8">
         <div className="flex justify-between mb-2">
@@ -612,6 +916,20 @@ export default function CampaignWizard() {
 
               <div className="space-y-4">
                 <Label className="text-base font-medium">{t('wizard.selectProfile')}</Label>
+                {/* Show franchise plan restriction notice */}
+                {allowedRiskProfilesData && !allowedRiskProfilesData.isUnrestricted && (
+                  <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-500/10 border border-blue-500/30" data-testid="franchise-plan-notice">
+                    <Info className="w-4 h-4 text-blue-500 flex-shrink-0" />
+                    <p className="text-xs text-blue-600 dark:text-blue-400">
+                      {language === 'pt-BR' 
+                        ? `Seu plano ${allowedRiskProfilesData.planName || allowedRiskProfilesData.planCode} permite os perfis: ${allowedRiskProfilesData.allowedProfileNames.join(', ')}`
+                        : language === 'es'
+                        ? `Su plan ${allowedRiskProfilesData.planName || allowedRiskProfilesData.planCode} permite los perfiles: ${allowedRiskProfilesData.allowedProfileNames.join(', ')}`
+                        : `Your ${allowedRiskProfilesData.planName || allowedRiskProfilesData.planCode} plan allows profiles: ${allowedRiskProfilesData.allowedProfileNames.join(', ')}`
+                      }
+                    </p>
+                  </div>
+                )}
                 {riskProfilesLoading ? (
                   <div className="flex gap-3">
                     <Skeleton className="h-20 flex-1" />
@@ -619,37 +937,65 @@ export default function CampaignWizard() {
                     <Skeleton className="h-20 flex-1" />
                   </div>
                 ) : riskProfiles && riskProfiles.length > 0 ? (
-                  <div className="grid grid-cols-3 gap-3">
-                    {riskProfiles.map((profile) => (
-                      <div
-                        key={profile.profile_code}
-                        className={`relative p-3 rounded-lg border-2 cursor-pointer transition-all text-center ${
-                          formData.investorProfile === profile.profile_code
-                            ? 'border-primary bg-primary/5'
-                            : 'border-muted hover-elevate'
-                        }`}
-                        onClick={() => {
-                          setFormData(prev => ({
-                            ...prev,
-                            investorProfile: profile.profile_code,
-                            maxDrawdown: Math.abs(parseFloat(profile.max_drawdown_30d_pct))
-                          }));
-                        }}
-                        data-testid={`profile-option-${profile.profile_code}`}
-                      >
-                        <Badge variant={
-                          profile.profile_code === 'C' ? 'secondary' :
-                          profile.profile_code === 'M' ? 'outline' : 'destructive'
-                        } className="mb-2">
-                          {profile.profile_code === 'C' ? t('wizard.risk.conservative') :
-                           profile.profile_code === 'M' ? t('wizard.risk.moderate') :
-                           t('wizard.risk.aggressive')}
-                        </Badge>
-                        <div className="text-xs text-muted-foreground">
-                          {t('wizard.riskPerTrade')}: {profile.risk_per_trade_pct}%
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                    {riskProfiles.map((profile) => {
+                      const isHighRisk = ['SA', 'F'].includes(profile.profile_code);
+                      const getProfileLabel = () => {
+                        switch(profile.profile_code) {
+                          case 'C': return t('wizard.risk.conservative');
+                          case 'M': return t('wizard.risk.moderate');
+                          case 'A': return t('wizard.risk.aggressive');
+                          case 'SA': return language === 'pt-BR' ? 'Super Agressivo' : language === 'es' ? 'Super Agresivo' : 'Super Aggressive';
+                          case 'F': return 'Full Custom';
+                          default: return profile.profile_name;
+                        }
+                      };
+                      const getBadgeVariant = () => {
+                        switch(profile.profile_code) {
+                          case 'C': return 'secondary' as const;
+                          case 'M': return 'outline' as const;
+                          case 'A': return 'destructive' as const;
+                          case 'SA': return 'destructive' as const;
+                          case 'F': return 'destructive' as const;
+                          default: return 'outline' as const;
+                        }
+                      };
+                      return (
+                        <div
+                          key={profile.profile_code}
+                          className={`relative p-3 rounded-lg border-2 cursor-pointer transition-all text-center ${
+                            formData.investorProfile === profile.profile_code
+                              ? 'border-primary bg-primary/5'
+                              : 'border-muted hover-elevate'
+                          } ${isHighRisk ? 'ring-1 ring-orange-500/30' : ''}`}
+                          onClick={() => {
+                            setFormData(prev => ({
+                              ...prev,
+                              investorProfile: profile.profile_code,
+                              maxDrawdown: Math.abs(parseFloat(profile.max_drawdown_30d_pct))
+                            }));
+                          }}
+                          data-testid={`profile-option-${profile.profile_code}`}
+                        >
+                          {isHighRisk && (
+                            <div className="absolute -top-2 -right-2">
+                              <AlertTriangle className="w-4 h-4 text-orange-500" />
+                            </div>
+                          )}
+                          <Badge variant={getBadgeVariant()} className="mb-2">
+                            {getProfileLabel()}
+                          </Badge>
+                          <div className="text-xs text-muted-foreground">
+                            {t('wizard.riskPerTrade')}: {profile.risk_per_trade_pct}%
+                          </div>
+                          {isHighRisk && (
+                            <div className="text-[10px] text-orange-500 mt-1">
+                              {language === 'pt-BR' ? 'Requer aprovação' : language === 'es' ? 'Requiere aprobación' : 'Requires approval'}
+                            </div>
+                          )}
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className="p-4 rounded-lg border border-destructive/50 bg-destructive/10 text-center">
@@ -705,6 +1051,23 @@ export default function CampaignWizard() {
                   </SelectContent>
                 </Select>
               </div>
+
+              <Separator className="my-4" />
+
+              {rbmPermissions?.canActivateRBM && (
+                <RBMSelector
+                  initialValue={formData.rbmMultiplier}
+                  onValueChange={(value) => setFormData(prev => ({ ...prev, rbmMultiplier: value }))}
+                />
+              )}
+              
+              {rbmPermissions && !rbmPermissions.canActivateRBM && (
+                <div className="p-4 border rounded-lg bg-muted/50" data-testid="text-rbm-permission-note">
+                  <p className="text-sm text-muted-foreground">
+                    {t('rbm.permissionDenied')}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
