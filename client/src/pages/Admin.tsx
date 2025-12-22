@@ -27,8 +27,22 @@ import {
   CheckCircle,
   AlertCircle,
   BookOpen,
-  Eye
+  Eye,
+  Wallet,
+  DollarSign,
+  AlertTriangle
 } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import AdminManual from '@/components/AdminManual';
 import AdminMonitor from '@/components/AdminMonitor';
 import { format } from 'date-fns';
@@ -97,6 +111,21 @@ interface ApiToken {
   created_by: string | null;
 }
 
+interface LiquidationResult {
+  success: boolean;
+  liquidatedCount: number;
+  failedCount: number;
+  estimatedUSD: number;
+  message: string;
+  assets: Array<{
+    asset: string;
+    quantity: number;
+    estimatedUSD: number;
+    txid: string;
+    error?: string;
+  }>;
+}
+
 export default function Admin() {
   const { t } = useLanguage();
   const { toast } = useToast();
@@ -109,6 +138,7 @@ export default function Admin() {
   const [newTokenName, setNewTokenName] = useState('');
   const [newTokenUserId, setNewTokenUserId] = useState('');
   const [generatedToken, setGeneratedToken] = useState('');
+  const [liquidationResult, setLiquidationResult] = useState<LiquidationResult | null>(null);
 
   const { data: stats, isLoading: statsLoading } = useQuery<PlatformStats>({
     queryKey: ['/api/admin/stats']
@@ -178,6 +208,30 @@ export default function Admin() {
     },
     onError: (error: any) => {
       toast({ title: t('common.error'), description: error.message, variant: 'destructive' });
+    }
+  });
+
+  const liquidateAssetsMutation = useMutation({
+    mutationFn: async (): Promise<LiquidationResult> => {
+      return apiRequest('/api/admin/kraken/liquidate-orphan-assets', 'POST') as Promise<LiquidationResult>;
+    },
+    onSuccess: (data: LiquidationResult) => {
+      setLiquidationResult(data);
+      if (data.success) {
+        toast({ 
+          title: 'Liquidação Concluída', 
+          description: `${data.liquidatedCount} ativos vendidos por ~$${data.estimatedUSD.toFixed(2)}` 
+        });
+      } else {
+        toast({ 
+          title: 'Liquidação Parcial', 
+          description: `${data.liquidatedCount} sucesso, ${data.failedCount} falhas`,
+          variant: 'destructive'
+        });
+      }
+    },
+    onError: (error: any) => {
+      toast({ title: 'Erro na Liquidação', description: error.message, variant: 'destructive' });
     }
   });
 
@@ -383,10 +437,14 @@ export default function Admin() {
       </div>
 
       <Tabs defaultValue="monitor" className="space-y-4">
-        <TabsList className="grid w-full grid-cols-7 max-w-4xl">
+        <TabsList className="grid w-full grid-cols-8 max-w-5xl">
           <TabsTrigger value="monitor" data-testid="tab-monitor">
             <Eye className="h-4 w-4 mr-2" />
             Monitor
+          </TabsTrigger>
+          <TabsTrigger value="kraken" data-testid="button-tab-kraken">
+            <Wallet className="h-4 w-4 mr-2" />
+            Kraken
           </TabsTrigger>
           <TabsTrigger value="emails" data-testid="tab-emails">
             <Mail className="h-4 w-4 mr-2" />
@@ -416,6 +474,147 @@ export default function Admin() {
 
         <TabsContent value="monitor" className="space-y-4">
           <AdminMonitor />
+        </TabsContent>
+
+        <TabsContent value="kraken" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Wallet className="h-5 w-5" />
+                Liquidar Ativos Órfãos
+              </CardTitle>
+              <CardDescription>
+                Venda todos os ativos de criptomoeda restantes na conta Kraken e converta para USD.
+                Útil para limpar ativos deixados após campanhas finalizadas.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="h-5 w-5 text-amber-500 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="font-medium text-amber-500">Atenção: Operação Irreversível</p>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Esta ação irá vender TODOS os ativos não-USD na conta Kraken ao preço de mercado atual.
+                      Ordens serão executadas imediatamente e não podem ser desfeitas.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button 
+                    variant="destructive" 
+                    size="lg"
+                    className="gap-2"
+                    disabled={liquidateAssetsMutation.isPending}
+                    data-testid="button-liquidate-assets"
+                  >
+                    {liquidateAssetsMutation.isPending ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Liquidando...
+                      </>
+                    ) : (
+                      <>
+                        <DollarSign className="h-4 w-4" />
+                        Liquidar Todos os Ativos
+                      </>
+                    )}
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle className="flex items-center gap-2">
+                      <AlertTriangle className="h-5 w-5 text-destructive" />
+                      Confirmar Liquidação Total
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Esta ação irá vender TODOS os ativos de criptomoeda na conta Kraken ao preço de mercado atual.
+                      <br /><br />
+                      <strong>Esta operação é irreversível.</strong> Tem certeza que deseja continuar?
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel data-testid="button-cancel-liquidation">Cancelar</AlertDialogCancel>
+                    <AlertDialogAction 
+                      onClick={() => liquidateAssetsMutation.mutate()}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                      data-testid="button-confirm-liquidation"
+                    >
+                      Confirmar Liquidação
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+
+              {liquidationResult && (
+                <Card className="mt-4" data-testid="card-liquidation-result">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-lg flex items-center gap-2">
+                      {liquidationResult.success ? (
+                        <CheckCircle className="h-5 w-5 text-green-500" />
+                      ) : (
+                        <AlertCircle className="h-5 w-5 text-amber-500" />
+                      )}
+                      Resultado da Liquidação
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid grid-cols-3 gap-4 mb-4">
+                      <div className="text-center p-3 bg-muted/50 rounded-lg" data-testid="metric-liquidated-count">
+                        <p className="text-2xl font-bold text-green-500">{liquidationResult.liquidatedCount}</p>
+                        <p className="text-xs text-muted-foreground">Vendidos</p>
+                      </div>
+                      <div className="text-center p-3 bg-muted/50 rounded-lg" data-testid="metric-failed-count">
+                        <p className="text-2xl font-bold text-red-500">{liquidationResult.failedCount}</p>
+                        <p className="text-xs text-muted-foreground">Falhas</p>
+                      </div>
+                      <div className="text-center p-3 bg-muted/50 rounded-lg" data-testid="metric-total-usd">
+                        <p className="text-2xl font-bold text-delfos-cyan">${liquidationResult.estimatedUSD.toFixed(2)}</p>
+                        <p className="text-xs text-muted-foreground">USD Estimado</p>
+                      </div>
+                    </div>
+
+                    {liquidationResult.assets.length > 0 ? (
+                      <Table data-testid="table-liquidated-assets">
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Ativo</TableHead>
+                            <TableHead>Quantidade</TableHead>
+                            <TableHead>USD</TableHead>
+                            <TableHead>Status</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {liquidationResult.assets.map((asset, idx) => (
+                            <TableRow key={idx} data-testid={`row-asset-${asset.asset}`}>
+                              <TableCell className="font-medium">{asset.asset}</TableCell>
+                              <TableCell className="font-mono">{asset.quantity.toFixed(6)}</TableCell>
+                              <TableCell className="font-mono">${asset.estimatedUSD.toFixed(2)}</TableCell>
+                              <TableCell>
+                                {asset.error ? (
+                                  <Badge variant="destructive" data-testid={`badge-error-${asset.asset}`}>{asset.error}</Badge>
+                                ) : (
+                                  <Badge className="bg-green-600" data-testid={`badge-success-${asset.asset}`}>Vendido</Badge>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    ) : (
+                      <div className="text-center py-6 text-muted-foreground" data-testid="text-no-assets">
+                        <Wallet className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                        <p>Nenhum ativo processado</p>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="emails" className="space-y-4">
