@@ -1,14 +1,30 @@
 import OpenAI from "openai";
+import { externalServiceToggleService } from './externalServiceToggleService';
 
-// Validate API key at startup
-if (!process.env.OPENAI_API_KEY) {
-  console.error("FATAL: OPENAI_API_KEY environment variable is not set");
-  throw new Error("OpenAI API key is required");
+// Lazy initialization - only create client when API key is present
+let openai: OpenAI | null = null;
+
+function getOpenAIClient(): OpenAI {
+  if (!openai) {
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error("OpenAI API key is required");
+    }
+    openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+  }
+  return openai;
 }
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Check if OpenAI service is enabled (with graceful fallback if toggle service not ready)
+async function isOpenAIEnabled(): Promise<boolean> {
+  try {
+    return await externalServiceToggleService.isServiceEnabled('openai');
+  } catch (error) {
+    console.warn('[OpenAI] Toggle service not available, defaulting to enabled');
+    return true;
+  }
+}
 
 // Configuration with environment variables
 const AI_CONFIG = {
@@ -85,6 +101,13 @@ export async function getChatCompletion(
   useAdvancedModel: boolean = false
 ): Promise<string> {
   try {
+    // Check if service is enabled
+    const enabled = await isOpenAIEnabled();
+    if (!enabled) {
+      console.log('[OpenAI] Service is disabled by admin toggle');
+      throw new Error("O serviço de AI está temporariamente desativado pelo administrador.");
+    }
+
     // Validate input
     if (!messages || messages.length === 0) {
       throw new Error("Mensagens vazias fornecidas");
@@ -98,7 +121,7 @@ export async function getChatCompletion(
     
     console.log(`[OpenAI] User ${userId} - Model: ${model} - Messages: ${messages.length}`);
     
-    const response = await openai.chat.completions.create({
+    const response = await getOpenAIClient().chat.completions.create({
       model,
       messages: [
         { role: "system", content: systemMessage },
