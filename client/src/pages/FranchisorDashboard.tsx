@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useQuery } from "@tanstack/react-query";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { usePersonaAuth } from "@/hooks/usePersonaAuth";
 import { 
   Building2, Users, DollarSign, TrendingUp, MapPin, 
   AlertTriangle, Crown, FileText, Activity, CheckCircle2
@@ -22,10 +23,12 @@ interface NetworkStats {
 
 export default function FranchisorDashboard() {
   const { t } = useLanguage();
+  const { isLoading: authLoading } = usePersonaAuth();
 
   const { data: stats, isLoading } = useQuery<NetworkStats>({
     queryKey: ['/api/franchisor/network-stats'],
     refetchInterval: 60000,
+    enabled: !authLoading, // Only fetch when authenticated
   });
 
   const defaultStats: NetworkStats = {
@@ -40,6 +43,18 @@ export default function FranchisorDashboard() {
   };
 
   const networkStats = stats || defaultStats;
+
+  // Show loading while authenticating
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-background p-4 md:p-6 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-muted-foreground">Loading...</p>
+        </div>
+      </div>
+    );
+  }
 
   const statCards = [
     {
