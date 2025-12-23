@@ -4438,11 +4438,12 @@ export const persona_credentials = pgTable("persona_credentials", {
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
-  index("idx_persona_cred_email").on(table.email),
   index("idx_persona_cred_type").on(table.persona_type),
   index("idx_persona_cred_user").on(table.user_id),
   index("idx_persona_cred_franchise").on(table.franchise_id),
-  uniqueIndex("idx_persona_cred_unique_email_type").on(table.email, table.persona_type),
+  // CRITICAL: Each email can only be used ONCE across ALL persona types
+  // Prevents cross-persona login reuse (Franchisor email != Master Franchise email != Franchise email)
+  uniqueIndex("idx_persona_cred_unique_email").on(table.email),
 ]);
 
 export const insertPersonaCredentialsSchema = createInsertSchema(persona_credentials).omit({
@@ -4454,6 +4455,43 @@ export const insertPersonaCredentialsSchema = createInsertSchema(persona_credent
 });
 export type InsertPersonaCredentials = z.infer<typeof insertPersonaCredentialsSchema>;
 export type PersonaCredentials = typeof persona_credentials.$inferSelect;
+
+// Persona Sessions - persistent session storage for persona authentication
+export const persona_sessions = pgTable("persona_sessions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  
+  // Session token (64 hex chars from crypto.randomBytes(32))
+  session_token: varchar("session_token", { length: 64 }).notNull().unique(),
+  
+  // Link to credentials
+  credentials_id: varchar("credentials_id").notNull().references(() => persona_credentials.id, { onDelete: 'cascade' }),
+  
+  // Persona info (denormalized for quick access)
+  persona_type: varchar("persona_type", { length: 30 }).notNull(),
+  email: varchar("email", { length: 255 }).notNull(),
+  franchise_id: varchar("franchise_id"),
+  
+  // Session expiry
+  expires_at: timestamp("expires_at").notNull(),
+  
+  // Tracking
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  last_accessed_at: timestamp("last_accessed_at").defaultNow().notNull(),
+  ip_address: varchar("ip_address", { length: 45 }),
+  user_agent: text("user_agent"),
+}, (table) => [
+  index("idx_persona_session_token").on(table.session_token),
+  index("idx_persona_session_expires").on(table.expires_at),
+  index("idx_persona_session_credentials").on(table.credentials_id),
+]);
+
+export const insertPersonaSessionSchema = createInsertSchema(persona_sessions).omit({
+  id: true,
+  created_at: true,
+  last_accessed_at: true,
+});
+export type InsertPersonaSession = z.infer<typeof insertPersonaSessionSchema>;
+export type PersonaSession = typeof persona_sessions.$inferSelect;
 
 // Franchise Leads - candidates from landing page awaiting approval
 export const franchise_leads = pgTable("franchise_leads", {
@@ -4546,6 +4584,8 @@ export const franchise_leads = pgTable("franchise_leads", {
   index("idx_franchise_leads_created").on(table.created_at),
   index("idx_franchise_leads_payment").on(table.payment_status),
   index("idx_franchise_leads_stripe_session").on(table.stripe_checkout_session_id),
+  // CRITICAL: Prevent duplicate registrations by same person (CPF/CNPJ + status)
+  uniqueIndex("idx_franchise_leads_document_active").on(table.document_number, table.status),
 ]);
 
 export const insertFranchiseLeadSchema = createInsertSchema(franchise_leads).omit({
@@ -4675,3 +4715,25 @@ export const insertExternalServiceAuditLogSchema = createInsertSchema(external_s
 });
 export type InsertExternalServiceAuditLog = z.infer<typeof insertExternalServiceAuditLogSchema>;
 export type ExternalServiceAuditLog = typeof external_service_audit_log.$inferSelect;
+
+// ========== FRANCHISOR LOGIN (Simple Email/Password Authentication) ==========
+export const franchisor_users = pgTable("franchisor_users", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  email: varchar("email", { length: 255 }).notNull().unique(),
+  password_hash: varchar("password_hash", { length: 255 }).notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  cpf_cnpj: varchar("cpf_cnpj", { length: 20 }), // CPF or CNPJ
+  phone: varchar("phone", { length: 20 }), // Phone number
+  role_title: varchar("role_title", { length: 100 }), // Job title/role
+  is_active: boolean("is_active").default(true).notNull(),
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  last_login_at: timestamp("last_login_at"),
+});
+
+export const insertFranchisorUserSchema = createInsertSchema(franchisor_users).omit({
+  id: true,
+  created_at: true,
+  last_login_at: true,
+});
+export type InsertFranchisorUser = z.infer<typeof insertFranchisorUserSchema>;
+export type FranchisorUser = typeof franchisor_users.$inferSelect;
