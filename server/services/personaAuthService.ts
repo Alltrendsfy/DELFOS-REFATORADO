@@ -127,18 +127,21 @@ class PersonaAuthService {
     }
   ): Promise<RegisterResult> {
     try {
+      // CRITICAL: Check if email exists in ANY persona type
+      // Prevents same email being used for Franchisor, Master Franchise, and Franchise logins
       const existingCreds = await db
         .select()
         .from(persona_credentials)
-        .where(
-          and(
-            eq(persona_credentials.email, email.toLowerCase()),
-            eq(persona_credentials.persona_type, personaType)
-          )
-        );
+        .where(eq(persona_credentials.email, email.toLowerCase()));
 
       if (existingCreds.length > 0) {
-        return { success: false, error: "email_already_registered" };
+        const existingType = existingCreds[0].persona_type;
+        return { 
+          success: false, 
+          error: "email_already_registered",
+          // Include which persona type already uses this email
+          errorDetails: `This email is already registered for ${existingType}. Each login type must use a unique email.`
+        };
       }
 
       const passwordHash = await this.hashPassword(password);
