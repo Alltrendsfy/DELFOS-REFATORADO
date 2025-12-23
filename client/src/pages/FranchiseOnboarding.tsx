@@ -1,6 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { 
@@ -22,7 +26,8 @@ import {
   Shield,
   TrendingUp,
   Users,
-  Zap
+  Zap,
+  Upload
 } from "lucide-react";
 
 interface FranchisePlan {
@@ -32,7 +37,7 @@ interface FranchisePlan {
   max_campaigns: number;
   max_capital_usd: string | null;
   royalty_percentage: string;
-  franchise_fee_usd: string;
+  franchise_fee_brl: string;
   max_drawdown_pct: string;
   max_position_size_pct: string;
   max_daily_trades: number;
@@ -40,85 +45,133 @@ interface FranchisePlan {
   is_active: boolean;
 }
 
+interface ContractTemplate {
+  id: string;
+  version: string;
+  content: string;
+  is_active: boolean;
+}
+
 const STEPS = [
   { id: 'plan', label: 'Plano', icon: Building2 },
-  { id: 'info', label: 'Dados', icon: FileText },
+  { id: 'info', label: 'Dados Pessoais', icon: FileText },
+  { id: 'docs', label: 'Documentos', icon: Upload },
   { id: 'contract', label: 'Contrato', icon: Shield },
   { id: 'payment', label: 'Pagamento', icon: CreditCard },
-  { id: 'complete', label: 'Conclusão', icon: CheckCircle },
 ];
 
+// Etapa 1: Dados Pessoais schema
+const personalDataSchema = z.object({
+  name: z.string().min(3, "Nome completo obrigatório"),
+  trade_name: z.string().min(1, "Nome fantasia obrigatório"),
+  document_type: z.enum(['cpf', 'cnpj']),
+  document_number: z.string().min(11, "Número de documento inválido"),
+  secondary_document: z.string().optional(),
+  birth_date: z.string().optional(),
+  email: z.string().email("Email inválido"),
+  phone: z.string().min(10, "Telefone inválido"),
+  whatsapp: z.string().optional(),
+  address_street: z.string().min(3, "Endereço obrigatório"),
+  address_number: z.string().min(1, "Número obrigatório"),
+  address_complement: z.string().optional(),
+  address_neighborhood: z.string().min(2, "Bairro obrigatório"),
+  address_zip: z.string().min(8, "CEP inválido"),
+  address_city: z.string().min(2, "Cidade obrigatória"),
+  address_country: z.string().default("BRA"),
+});
+
+type PersonalData = z.infer<typeof personalDataSchema>;
+
 export default function FranchiseOnboarding() {
-  const [, setLocation] = useLocation();
+  const [location, setLocation] = useLocation();
   const { toast } = useToast();
   const [currentStep, setCurrentStep] = useState(0);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
-  const [franchiseData, setFranchiseData] = useState({
-    name: '',
-    cnpj: '',
-    tax_id: '',
-    tax_id_type: 'cnpj',
-    address: '',
-    country: 'BRA',
-  });
   const [contractAccepted, setContractAccepted] = useState(false);
-  const [createdFranchiseId, setCreatedFranchiseId] = useState<string | null>(null);
+  const [contractScrolled, setContractScrolled] = useState(false);
+  const [createdLeadId, setCreatedLeadId] = useState<string | null>(null);
+  const [uploadedDocs, setUploadedDocs] = useState<string[]>([]);
+
+  // Get plan from URL parameter
+  useEffect(() => {
+    const params = new URLSearchParams(location.split('?')[1]);
+    const planCode = params.get('plan');
+    if (planCode) {
+      setSelectedPlanId(planCode);
+    }
+  }, [location]);
+
+  const form = useForm<PersonalData>({
+    resolver: zodResolver(personalDataSchema),
+    defaultValues: {
+      document_type: 'cpf',
+      address_country: 'BRA',
+    },
+  });
 
   const { data: plans, isLoading: plansLoading } = useQuery<FranchisePlan[]>({
-    queryKey: ['/api/franchise-onboarding/plans'],
+    queryKey: ['/api/franchise-plans'],
   });
 
-  const startMutation = useMutation({
-    mutationFn: async (data: { planId: string; name: string; cnpj?: string; tax_id?: string; tax_id_type?: string; address?: string; country?: string }) => {
-      const response = await apiRequest('POST', '/api/franchise-onboarding/start', data);
-      return response.json();
+  const { data: contract } = useQuery<ContractTemplate>({
+    queryKey: ['/api/contract-templates/active'],
+  });
+
+  const createLeadMutation = useMutation({
+    mutationFn: async (data: PersonalData) => {
+      return apiRequest<{ id: string }>('/api/franchise-leads', 'POST', {
+        ...data,
+        plan_id: selectedPlanId,
+      });
     },
     onSuccess: (data) => {
-      setCreatedFranchiseId(data.franchiseId);
+      if (data?.id) {
+        setCreatedLeadId(data.id);
+      }
       setCurrentStep(2);
       toast({
-        title: "Franquia criada",
-        description: "Agora aceite o contrato para continuar.",
+        title: "Dados salvos",
+        description: "Agora envie os documentos necessários.",
       });
     },
     onError: (error: any) => {
       toast({
         title: "Erro",
-        description: error.message || "Falha ao criar franquia",
+        description: error.message,
         variant: "destructive",
       });
     },
   });
 
   const acceptContractMutation = useMutation({
-    mutationFn: async (franchiseId: string) => {
-      const response = await apiRequest('POST', `/api/franchise-onboarding/${franchiseId}/accept-contract`, {
-        contractVersion: '1.0',
+    mutationFn: async () => {
+      if (!createdLeadId || !contract) return;
+      return apiRequest('POST', `/api/franchise-leads/${createdLeadId}/accept-contract`, {
+        contract_version: contract.version,
       });
-      return response.json();
     },
     onSuccess: () => {
       const selectedPlan = plans?.find(p => p.id === selectedPlanId);
-      const fee = parseFloat(selectedPlan?.franchise_fee_usd || '0');
+      const fee = parseFloat(selectedPlan?.franchise_fee_brl || '0');
       
       if (fee > 0) {
-        setCurrentStep(3);
+        setCurrentStep(4);
         toast({
           title: "Contrato aceito",
-          description: "Agora realize o pagamento da taxa de franquia.",
+          description: "Agora realize o pagamento.",
         });
       } else {
         setCurrentStep(4);
         toast({
           title: "Contrato aceito",
-          description: "Sua franquia está aguardando aprovação.",
+          description: "Sua aplicação está em análise.",
         });
       }
     },
     onError: (error: any) => {
       toast({
         title: "Erro",
-        description: error.message || "Falha ao aceitar contrato",
+        description: error.message,
         variant: "destructive",
       });
     },
@@ -126,75 +179,75 @@ export default function FranchiseOnboarding() {
 
   const selectedPlan = plans?.find(p => p.id === selectedPlanId);
 
-  const handleNext = () => {
-    if (currentStep === 0) {
-      if (!selectedPlanId) {
-        toast({ title: "Selecione um plano", variant: "destructive" });
-        return;
+  const handleStepOne = async () => {
+    const isValid = await form.trigger();
+    if (!isValid) return;
+    
+    const data = form.getValues();
+    try {
+      const res = await createLeadMutation.mutateAsync(data);
+      if (res?.id) {
+        setCreatedLeadId(res.id);
       }
-      setCurrentStep(1);
-    } else if (currentStep === 1) {
-      if (!franchiseData.name) {
-        toast({ title: "Nome da franquia é obrigatório", variant: "destructive" });
-        return;
-      }
-      
-      const taxIdValue = franchiseData.tax_id_type === 'cnpj' 
-        ? franchiseData.cnpj 
-        : franchiseData.tax_id;
-      
-      if (!taxIdValue) {
-        toast({ 
-          title: `${franchiseData.tax_id_type === 'cnpj' ? 'CNPJ' : franchiseData.tax_id_type === 'cpf' ? 'CPF' : 'Tax ID'} é obrigatório`, 
-          variant: "destructive" 
-        });
-        return;
-      }
-      
-      const payload: {
-        planId: string;
-        name: string;
-        cnpj?: string;
-        tax_id?: string;
-        tax_id_type: string;
-        address?: string;
-        country?: string;
-      } = {
-        planId: selectedPlanId!,
-        name: franchiseData.name,
-        tax_id_type: franchiseData.tax_id_type,
-        address: franchiseData.address || undefined,
-        country: franchiseData.country,
-      };
-      
-      if (franchiseData.tax_id_type === 'cnpj') {
-        payload.cnpj = franchiseData.cnpj;
-      } else {
-        payload.tax_id = franchiseData.tax_id;
-      }
-      
-      startMutation.mutate(payload);
-    } else if (currentStep === 2) {
-      if (!contractAccepted) {
-        toast({ title: "Aceite o contrato para continuar", variant: "destructive" });
-        return;
-      }
-      if (createdFranchiseId) {
-        acceptContractMutation.mutate(createdFranchiseId);
-      }
+      setCurrentStep(2);
+    } catch (err) {
+      console.error("Error in step 1:", err);
     }
   };
 
-  const handleBack = () => {
-    if (currentStep > 0 && currentStep < 2) {
-      setCurrentStep(currentStep - 1);
+  const handleStepTwo = () => {
+    const docType = form.getValues('document_type');
+    const requiredDocs = docType === 'cpf' ? ['rg_cpf'] : ['social_contract'];
+    
+    if (uploadedDocs.length === 0) {
+      toast({
+        title: "Documentos obrigatórios",
+        description: `Envie ${docType === 'cpf' ? 'RG/CPF' : 'Contrato Social'}`,
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    setCurrentStep(3);
+  };
+
+  const handleStepThree = async () => {
+    if (!contractAccepted) {
+      toast({
+        title: "Contrato não aceito",
+        description: "Você deve aceitar os termos para continuar",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    try {
+      await acceptContractMutation.mutateAsync();
+      const selectedPlan = plans?.find(p => p.id === selectedPlanId);
+      const fee = parseFloat(selectedPlan?.franchise_fee_brl || '0');
+      
+      if (fee > 0) {
+        setCurrentStep(4);
+        toast({
+          title: "Contrato aceito",
+          description: "Agora realize o pagamento.",
+        });
+      } else {
+        setCurrentStep(4);
+        toast({
+          title: "Contrato aceito",
+          description: "Sua aplicação está em análise.",
+        });
+      }
+    } catch (err) {
+      console.error("Error in contract step:", err);
     }
   };
 
   const formatCurrency = (value: string | null) => {
     if (!value) return 'Ilimitado';
     const num = parseFloat(value);
-    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'USD' }).format(num);
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(num);
   };
 
   if (plansLoading) {
@@ -216,6 +269,7 @@ export default function FranchiseOnboarding() {
         </p>
       </div>
 
+      {/* Progress Steps */}
       <div className="flex items-center justify-between mb-8">
         {STEPS.map((step, index) => (
           <div key={step.id} className="flex items-center">
@@ -238,6 +292,7 @@ export default function FranchiseOnboarding() {
         ))}
       </div>
 
+      {/* Etapa 0: Seleção de Plano */}
       {currentStep === 0 && (
         <div className="space-y-4">
           <h2 className="text-xl font-semibold mb-4">Escolha seu Plano</h2>
@@ -259,8 +314,8 @@ export default function FranchiseOnboarding() {
                     )}
                   </CardTitle>
                   <CardDescription>
-                    {parseFloat(plan.franchise_fee_usd) > 0 
-                      ? formatCurrency(plan.franchise_fee_usd)
+                    {parseFloat(plan.franchise_fee_brl) > 0 
+                      ? formatCurrency(plan.franchise_fee_brl)
                       : 'Gratuito'}
                   </CardDescription>
                 </CardHeader>
@@ -290,285 +345,474 @@ export default function FranchiseOnboarding() {
         </div>
       )}
 
+      {/* Etapa 1: Dados Pessoais */}
       {currentStep === 1 && (
         <Card>
           <CardHeader>
-            <CardTitle>Dados da Franquia</CardTitle>
+            <CardTitle>Dados Pessoais</CardTitle>
             <CardDescription>
-              Preencha as informações da sua franquia
+              Preencha suas informações pessoais
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="name">Nome da Franquia *</Label>
-              <Input
-                id="name"
-                value={franchiseData.name}
-                onChange={(e) => setFranchiseData({ ...franchiseData, name: e.target.value })}
-                placeholder="Ex: DELFOS São Paulo"
-                data-testid="input-franchise-name"
-              />
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="tax_id_type">Tipo de Documento</Label>
-                <Select
-                  value={franchiseData.tax_id_type}
-                  onValueChange={(value) => setFranchiseData({ ...franchiseData, tax_id_type: value })}
-                >
-                  <SelectTrigger data-testid="select-tax-type">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="cnpj">CNPJ (Brasil)</SelectItem>
-                    <SelectItem value="cpf">CPF (Brasil)</SelectItem>
-                    <SelectItem value="other">Outro</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="tax_id_input">
-                  {franchiseData.tax_id_type === 'cnpj' ? 'CNPJ' : 
-                   franchiseData.tax_id_type === 'cpf' ? 'CPF' : 'Tax ID'}
-                </Label>
-                <Input
-                  id="tax_id_input"
-                  value={franchiseData.tax_id_type === 'cnpj' ? franchiseData.cnpj : franchiseData.tax_id}
-                  onChange={(e) => {
-                    if (franchiseData.tax_id_type === 'cnpj') {
-                      setFranchiseData({ ...franchiseData, cnpj: e.target.value });
-                    } else {
-                      setFranchiseData({ ...franchiseData, tax_id: e.target.value });
-                    }
-                  }}
-                  placeholder={franchiseData.tax_id_type === 'cnpj' ? '00.000.000/0001-00' : 
-                               franchiseData.tax_id_type === 'cpf' ? '000.000.000-00' : 'Tax identification number'}
-                  data-testid="input-tax-id"
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="address">Endereço</Label>
-              <Input
-                id="address"
-                value={franchiseData.address}
-                onChange={(e) => setFranchiseData({ ...franchiseData, address: e.target.value })}
-                placeholder="Endereço completo"
-                data-testid="input-address"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="country">País</Label>
-              <Select
-                value={franchiseData.country}
-                onValueChange={(value) => setFranchiseData({ ...franchiseData, country: value })}
-              >
-                <SelectTrigger data-testid="select-country">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="BRA">Brasil</SelectItem>
-                  <SelectItem value="USA">Estados Unidos</SelectItem>
-                  <SelectItem value="PRT">Portugal</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {selectedPlan && (
-              <div className="bg-muted p-4 rounded-lg">
-                <h4 className="font-medium mb-2">Plano Selecionado: {selectedPlan.name}</h4>
-                <div className="text-sm text-muted-foreground space-y-1">
-                  <div>Taxa de Franquia: {formatCurrency(selectedPlan.franchise_fee_usd)}</div>
-                  <div>Royalty: {selectedPlan.royalty_percentage}% sobre lucro líquido</div>
+          <CardContent>
+            <Form {...form}>
+              <form onSubmit={form.handleSubmit(handleStepOne)} className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <FormField
+                    control={form.control}
+                    name="name"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Nome Completo *</FormLabel>
+                        <FormControl>
+                          <Input placeholder="Seu nome completo" {...field} data-testid="input-name" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="trade_name"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Nome Fantasia *</FormLabel>
+                        <FormControl>
+                          <Input placeholder="Nome da sua empresa" {...field} data-testid="input-trade-name" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
                 </div>
-              </div>
-            )}
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <FormField
+                    control={form.control}
+                    name="document_type"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Tipo de Documento *</FormLabel>
+                        <Select onValueChange={field.onChange} defaultValue={field.value}>
+                          <FormControl>
+                            <SelectTrigger data-testid="select-document-type">
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            <SelectItem value="cpf">CPF (Pessoa Física)</SelectItem>
+                            <SelectItem value="cnpj">CNPJ (Pessoa Jurídica)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="document_number"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{form.watch('document_type') === 'cpf' ? 'CPF' : 'CNPJ'} *</FormLabel>
+                        <FormControl>
+                          <Input 
+                            placeholder={form.watch('document_type') === 'cpf' ? '000.000.000-00' : '00.000.000/0001-00'} 
+                            {...field} 
+                            data-testid="input-document-number" 
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
+
+                {form.watch('document_type') === 'cpf' && (
+                  <FormField
+                    control={form.control}
+                    name="secondary_document"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>RG</FormLabel>
+                        <FormControl>
+                          <Input placeholder="RG" {...field} data-testid="input-rg" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
+
+                <FormField
+                  control={form.control}
+                  name="birth_date"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Data de Nascimento</FormLabel>
+                      <FormControl>
+                        <Input type="date" {...field} data-testid="input-birth-date" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <FormField
+                    control={form.control}
+                    name="email"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Email *</FormLabel>
+                        <FormControl>
+                          <Input type="email" placeholder="seu@email.com" {...field} data-testid="input-email" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="phone"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Telefone *</FormLabel>
+                        <FormControl>
+                          <Input placeholder="(00) 0000-0000" {...field} data-testid="input-phone" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
+
+                <FormField
+                  control={form.control}
+                  name="whatsapp"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>WhatsApp</FormLabel>
+                      <FormControl>
+                        <Input placeholder="(00) 99999-9999" {...field} data-testid="input-whatsapp" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <Separator className="my-4" />
+
+                <div className="text-lg font-semibold">Endereço</div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <FormField
+                    control={form.control}
+                    name="address_zip"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>CEP *</FormLabel>
+                        <FormControl>
+                          <Input placeholder="00000-000" {...field} data-testid="input-zip" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
+
+                <FormField
+                  control={form.control}
+                  name="address_street"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Rua *</FormLabel>
+                      <FormControl>
+                        <Input placeholder="Rua Principal" {...field} data-testid="input-street" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <div className="grid gap-4 md:grid-cols-3">
+                  <FormField
+                    control={form.control}
+                    name="address_number"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Número *</FormLabel>
+                        <FormControl>
+                          <Input placeholder="123" {...field} data-testid="input-number" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="address_complement"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Complemento</FormLabel>
+                        <FormControl>
+                          <Input placeholder="Apto 101" {...field} data-testid="input-complement" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="address_neighborhood"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Bairro *</FormLabel>
+                        <FormControl>
+                          <Input placeholder="Centro" {...field} data-testid="input-neighborhood" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <FormField
+                    control={form.control}
+                    name="address_city"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Cidade *</FormLabel>
+                        <FormControl>
+                          <Input placeholder="São Paulo" {...field} data-testid="input-city" />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="address_country"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>País *</FormLabel>
+                        <Select onValueChange={field.onChange} defaultValue={field.value}>
+                          <FormControl>
+                            <SelectTrigger data-testid="select-country">
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            <SelectItem value="BRA">Brasil</SelectItem>
+                            <SelectItem value="USA">Estados Unidos</SelectItem>
+                            <SelectItem value="PRT">Portugal</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
+
+                {selectedPlan && (
+                  <div className="bg-muted p-4 rounded-lg mt-4">
+                    <h4 className="font-medium mb-2">Plano Selecionado: {selectedPlan.name}</h4>
+                    <div className="text-sm text-muted-foreground space-y-1">
+                      <div>Taxa de Franquia: {formatCurrency(selectedPlan.franchise_fee_brl)}</div>
+                      <div>Royalty: {selectedPlan.royalty_percentage}% sobre lucro líquido</div>
+                    </div>
+                  </div>
+                )}
+
+                <Button 
+                  type="submit" 
+                  className="w-full mt-6"
+                  disabled={createLeadMutation.isPending}
+                  data-testid="button-save-personal-data"
+                >
+                  {createLeadMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                  Continuar
+                </Button>
+              </form>
+            </Form>
           </CardContent>
         </Card>
       )}
 
+      {/* Etapa 2: Upload Documentos */}
       {currentStep === 2 && (
         <Card>
           <CardHeader>
-            <CardTitle>Contrato de Franquia</CardTitle>
+            <CardTitle>Enviar Documentos</CardTitle>
             <CardDescription>
-              Leia e aceite os termos do contrato
+              {form.watch('document_type') === 'cpf' 
+                ? 'Envie cópia do RG/CPF' 
+                : 'Envie o Contrato Social'}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="bg-muted p-4 rounded-lg h-64 overflow-y-auto text-sm">
-              <h4 className="font-bold mb-2">CONTRATO DE FRANQUIA DELFOS</h4>
-              <p className="mb-2">Versão 1.0 - Dezembro 2024</p>
-              <Separator className="my-4" />
-              <p className="mb-2">
-                <strong>1. OBJETO</strong><br />
-                Este contrato estabelece os termos e condições para operação como franqueado 
-                da plataforma DELFOS de trading automatizado de criptomoedas.
+            <div className="border-2 border-dashed rounded-lg p-8 text-center">
+              <Upload className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+              <p className="text-sm text-muted-foreground mb-2">
+                Clique para selecionar ou arraste os arquivos
               </p>
-              <p className="mb-2">
-                <strong>2. MODELO DE NEGÓCIO</strong><br />
-                - O DELFOS NÃO opera capital próprio<br />
-                - O franqueado opera com capital próprio<br />
-                - A franqueadora ganha quando o franqueado ganha (royalties)<br />
-                - Royalties são calculados apenas sobre lucro líquido realizado
-              </p>
-              <p className="mb-2">
-                <strong>3. RESPONSABILIDADES DO FRANQUEADO</strong><br />
-                - Conectar corretora própria (somente API de trade)<br />
-                - Definir capital disponível dentro dos limites do plano<br />
-                - Tomar decisões sobre Opportunity Blueprints<br />
-                - Arcar com riscos e resultados das operações
-              </p>
-              <p className="mb-2">
-                <strong>4. RESPONSABILIDADES DA FRANQUEADORA</strong><br />
-                - Fornecer infraestrutura e tecnologia<br />
-                - Gerar Opportunity Blueprints via IA<br />
-                - Monitorar risco e circuit breakers<br />
-                - Calcular e auditar royalties
-              </p>
-              <p className="mb-2">
-                <strong>5. ROYALTIES</strong><br />
-                Conforme plano contratado, sobre lucro líquido realizado.
-                Sem lucro = sem royalty.
-              </p>
-              <p className="mb-2">
-                <strong>6. VIGÊNCIA</strong><br />
-                Contrato por prazo indeterminado, renovável automaticamente.
-              </p>
+              <Input 
+                type="file" 
+                multiple 
+                accept="image/*,.pdf"
+                data-testid="input-documents"
+                className="hidden"
+                id="docs-input"
+              />
+              <Button variant="outline" onClick={() => document.getElementById('docs-input')?.click()}>
+                Selecionar Arquivos
+              </Button>
+              {uploadedDocs.length > 0 && (
+                <div className="mt-4">
+                  <p className="text-sm font-medium mb-2">{uploadedDocs.length} arquivo(s) selecionado(s)</p>
+                </div>
+              )}
             </div>
+
+            <Button 
+              className="w-full" 
+              onClick={handleStepTwo}
+              data-testid="button-confirm-docs"
+            >
+              Continuar
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Etapa 3: Contrato */}
+      {currentStep === 3 && contract && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Contrato de Adesão</CardTitle>
+            <CardDescription>
+              Leia e aceite os termos - versão {contract.version}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div 
+              className="bg-muted p-4 rounded-lg h-80 overflow-y-auto text-sm border"
+              onScroll={(e) => {
+                const element = e.currentTarget;
+                const isScrolledToBottom = element.scrollHeight - element.scrollTop < element.clientHeight + 10;
+                setContractScrolled(isScrolledToBottom);
+              }}
+              data-testid="div-contract-scroll"
+            >
+              <div dangerouslySetInnerHTML={{ __html: contract.content }} />
+            </div>
+
+            {!contractScrolled && (
+              <Badge variant="secondary" className="w-full justify-center">
+                Role até o final para aceitar
+              </Badge>
+            )}
 
             <div className="flex items-start gap-3">
               <Checkbox
                 id="accept"
                 checked={contractAccepted}
                 onCheckedChange={(checked) => setContractAccepted(checked === true)}
+                disabled={!contractScrolled}
                 data-testid="checkbox-accept-contract"
               />
-              <Label htmlFor="accept" className="text-sm leading-relaxed">
-                Li e aceito os termos do Contrato de Franquia DELFOS. Compreendo que 
-                opero com capital próprio e que a franqueadora não é responsável por 
-                eventuais prejuízos nas operações.
+              <Label htmlFor="accept" className="text-sm leading-relaxed cursor-pointer">
+                Li e aceito os termos do Contrato de Adesão DELFOS. Compreendo que opero com capital próprio.
               </Label>
             </div>
+
+            <Button 
+              className="w-full" 
+              onClick={handleStepThree}
+              disabled={!contractAccepted || acceptContractMutation.isPending}
+              data-testid="button-accept-contract"
+            >
+              {acceptContractMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Aceitar e Continuar
+            </Button>
           </CardContent>
         </Card>
       )}
 
-      {currentStep === 3 && (
+      {/* Etapa 4: Pagamento */}
+      {currentStep === 4 && (
         <Card>
           <CardHeader>
             <CardTitle>Pagamento da Taxa de Franquia</CardTitle>
             <CardDescription>
-              Realize o pagamento para ativar sua franquia
+              Escolha o método de pagamento
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="bg-muted p-6 rounded-lg text-center">
               <p className="text-sm text-muted-foreground mb-2">Valor a pagar:</p>
               <p className="text-3xl font-bold text-primary">
-                {formatCurrency(selectedPlan?.franchise_fee_usd || '0')}
+                {formatCurrency(selectedPlan?.franchise_fee_brl || '0')}
               </p>
             </div>
 
             <div className="space-y-4">
-              <div className="border rounded-lg p-4">
+              <div className="border rounded-lg p-4 hover-elevate cursor-pointer transition-all" data-testid="option-pix">
                 <h4 className="font-medium mb-2">PIX</h4>
                 <p className="text-sm text-muted-foreground mb-2">
-                  Escaneie o QR Code ou copie a chave PIX:
+                  Transferência instantânea
                 </p>
-                <code className="text-xs bg-muted p-2 rounded block">
-                  delfos@franquia.com.br
-                </code>
               </div>
 
-              <div className="border rounded-lg p-4">
-                <h4 className="font-medium mb-2">Transferência Bancária</h4>
-                <div className="text-sm text-muted-foreground space-y-1">
-                  <p>Banco: 001 - Banco do Brasil</p>
-                  <p>Agência: 0001</p>
-                  <p>Conta: 12345-6</p>
-                  <p>CNPJ: 00.000.000/0001-00</p>
-                </div>
+              <div className="border rounded-lg p-4 hover-elevate cursor-pointer transition-all" data-testid="option-boleto">
+                <h4 className="font-medium mb-2">Boleto Bancário</h4>
+                <p className="text-sm text-muted-foreground mb-2">
+                  Processado em 1-2 dias úteis
+                </p>
+              </div>
+
+              <div className="border rounded-lg p-4 hover-elevate cursor-pointer transition-all" data-testid="option-card">
+                <h4 className="font-medium mb-2">Cartão de Crédito</h4>
+                <p className="text-sm text-muted-foreground mb-2">
+                  Processado imediatamente
+                </p>
               </div>
             </div>
 
             <Badge variant="secondary" className="w-full justify-center py-2">
-              Após o pagamento, sua franquia será aprovada em até 24 horas
+              Sua franquia será aprovada em até 24 horas após o pagamento
             </Badge>
+
+            <Button className="w-full" data-testid="button-proceed-payment">
+              Prosseguir para Pagamento
+            </Button>
           </CardContent>
         </Card>
       )}
 
-      {currentStep === 4 && (
-        <Card>
-          <CardHeader className="text-center">
-            <div className="mx-auto w-16 h-16 bg-primary/20 rounded-full flex items-center justify-center mb-4">
-              <CheckCircle className="h-8 w-8 text-primary" />
-            </div>
-            <CardTitle>Onboarding Concluído!</CardTitle>
-            <CardDescription>
-              Sua franquia está aguardando aprovação da franqueadora.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4 text-center">
-            <p className="text-muted-foreground">
-              Você receberá uma notificação quando sua franquia for aprovada.
-              Enquanto isso, você pode explorar a plataforma.
-            </p>
-
-            <div className="flex flex-col gap-2">
-              <Button 
-                onClick={() => setLocation('/')}
-                data-testid="button-go-dashboard"
-              >
-                Ir para o Dashboard
-              </Button>
-              <Button 
-                variant="outline" 
-                onClick={() => setLocation('/franchises')}
-                data-testid="button-view-franchises"
-              >
-                Ver Minhas Franquias
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
+      {/* Navigation */}
       {currentStep < 4 && (
         <div className="flex justify-between mt-8">
           <Button
             variant="outline"
-            onClick={handleBack}
-            disabled={currentStep === 0 || currentStep >= 2}
+            onClick={() => setCurrentStep(Math.max(0, currentStep - 1))}
+            disabled={currentStep === 0}
             data-testid="button-back"
           >
             <ArrowLeft className="h-4 w-4 mr-2" />
             Voltar
           </Button>
 
-          <Button
-            onClick={handleNext}
-            disabled={
-              startMutation.isPending || 
-              acceptContractMutation.isPending ||
-              currentStep === 3
-            }
-            data-testid="button-next"
-          >
-            {(startMutation.isPending || acceptContractMutation.isPending) && (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            )}
-            {currentStep === 0 ? 'Continuar' :
-             currentStep === 1 ? 'Criar Franquia' :
-             currentStep === 2 ? 'Aceitar Contrato' :
-             'Próximo'}
-            <ArrowRight className="h-4 w-4 ml-2" />
-          </Button>
+          {currentStep === 0 && (
+            <Button
+              onClick={() => setCurrentStep(1)}
+              disabled={!selectedPlanId}
+              data-testid="button-next-plan"
+            >
+              Continuar
+              <ArrowRight className="h-4 w-4 ml-2" />
+            </Button>
+          )}
         </div>
       )}
     </div>
