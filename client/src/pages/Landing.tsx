@@ -1,4 +1,6 @@
-import { useState, FormEvent } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +25,7 @@ import {
   ExternalLink,
   Users,
   Building2,
+  Crown,
   Rocket,
   HeadphonesIcon,
   GraduationCap,
@@ -31,7 +34,8 @@ import {
   Award,
   Phone,
   Mail,
-  MapPin
+  MapPin,
+  Loader2
 } from "lucide-react";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useTheme } from "@/components/ThemeProvider";
@@ -51,7 +55,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 
 const translations = {
@@ -63,10 +66,10 @@ const translations = {
       contact: "Contact"
     },
     hero: {
-      badge: "DELFOS Franchise Network",
-      title: "Be Part of the",
-      titleHighlight: "Future of Crypto Trading",
-      subtitle: "Join the DELFOS franchise network and offer your clients cutting-edge AI-powered trading technology. Low entry investment, high growth potential.",
+      badge: "Institutional Trading Platform V2.0+",
+      title: "Autonomous Trading",
+      titleHighlight: "Powered by Artificial Intelligence",
+      subtitle: "Offer your clients a professional trading platform with multi-layer risk protection, intelligent campaigns, and continuous AI learning. Technology that works for you 24/7.",
       cta: "Become a Franchisee",
       ctaSecondary: "Learn More"
     },
@@ -114,9 +117,12 @@ const translations = {
         description: "Perfect for entrepreneurs starting their journey in crypto trading services.",
         investment: "$25,000",
         investmentLabel: "Initial Investment",
+        riskMultiplier: "2x",
+        riskMultiplierLabel: "Max Risk Multiplier",
         features: [
           "Conservative risk profile",
           "Up to 50 client accounts",
+          "Risk multiplier up to 2x",
           "Basic training program",
           "Email support",
           "Marketing starter kit"
@@ -129,9 +135,12 @@ const translations = {
         description: "Ideal for established businesses looking to expand their financial services.",
         investment: "$75,000",
         investmentLabel: "Initial Investment",
+        riskMultiplier: "3x",
+        riskMultiplierLabel: "Max Risk Multiplier",
         features: [
           "Conservative & Moderate profiles",
           "Up to 200 client accounts",
+          "Risk multiplier up to 3x",
           "Advanced training program",
           "Priority phone & email support",
           "Full marketing suite",
@@ -144,9 +153,12 @@ const translations = {
         description: "For large-scale operations with maximum flexibility and premium benefits.",
         investment: "$150,000",
         investmentLabel: "Initial Investment",
+        riskMultiplier: "4x",
+        riskMultiplierLabel: "Max Risk Multiplier",
         features: [
           "All risk profiles unlocked",
           "Unlimited client accounts",
+          "Risk multiplier up to 4x",
           "Executive training program",
           "24/7 dedicated support",
           "Custom branding options",
@@ -154,7 +166,7 @@ const translations = {
           "White-label possibilities"
         ],
         cta: "Contact Sales"
-      }
+      },
     },
     howItWorks: {
       title: "How It Works",
@@ -241,6 +253,65 @@ const translations = {
       subtitle: "Join the DELFOS network and be part of the future of automated crypto trading.",
       button: "Apply Now"
     },
+    accessPortal: {
+      title: "Access Portal",
+      subtitle: "Already a DELFOS partner? Access your exclusive dashboard.",
+      franchisor: "Franchisor",
+      franchisorDesc: "Global network management and governance dashboard.",
+      master: "Master Franchise",
+      masterDesc: "Regional territory management and oversight.",
+      franchise: "Franchise",
+      franchiseDesc: "Daily operations and client management.",
+      accessButton: "Access"
+    },
+    technology: {
+      title: "Cutting-Edge Technology",
+      subtitle: "A complete ecosystem that automates every aspect of professional trading.",
+      items: [
+        {
+          icon: "Brain",
+          title: "Autonomous AI",
+          description: "Trading system that learns and adapts to market conditions in real-time."
+        },
+        {
+          icon: "Activity",
+          title: "Volatility Analysis",
+          description: "4-level intelligent classification engine for automatic strategy adjustment."
+        },
+        {
+          icon: "Layers",
+          title: "Intelligent Campaigns",
+          description: "30-day cycles with daily compounding and isolated position management."
+        },
+        {
+          icon: "Sparkles",
+          title: "Continuous Learning",
+          description: "Pattern discovery system that constantly improves trading performance."
+        }
+      ]
+    },
+    capitalProtection: {
+      title: "Capital Protection",
+      subtitle: "Your clients' security is our priority. Multi-layer protection system.",
+      items: [
+        {
+          title: "Multi-Layer Security",
+          description: "Automatic circuit breakers that stop operations under adverse conditions."
+        },
+        {
+          title: "6 Automatic Validations",
+          description: "Quality gate that verifies every trade before execution."
+        },
+        {
+          title: "Auto-Rollback",
+          description: "Automatic protection that reverts risk settings if needed."
+        },
+        {
+          title: "Risk Multiplier",
+          description: "Progressive system from 2x to 5x with task-based unlocking."
+        }
+      ]
+    },
     footer: {
       copyright: "DELFOS - Oracle of Trading. Professional Crypto Trading Franchise Network.",
       links: {
@@ -269,10 +340,10 @@ const translations = {
       contact: "Contacto"
     },
     hero: {
-      badge: "Red de Franquicias DELFOS",
-      title: "Se Parte del",
-      titleHighlight: "Futuro del Trading Cripto",
-      subtitle: "Unete a la red de franquicias DELFOS y ofrece a tus clientes tecnologia de trading impulsada por IA. Baja inversion inicial, alto potencial de crecimiento.",
+      badge: "Plataforma Institucional de Trading V2.0+",
+      title: "Trading Autonomo",
+      titleHighlight: "Impulsado por Inteligencia Artificial",
+      subtitle: "Ofrece a tus clientes una plataforma de trading profesional con proteccion de riesgo multicapa, campanas inteligentes y aprendizaje continuo de IA. Tecnologia que trabaja para ti 24/7.",
       cta: "Ser Franquiciado",
       ctaSecondary: "Saber Mas"
     },
@@ -320,9 +391,12 @@ const translations = {
         description: "Perfecto para emprendedores que inician su camino en servicios de trading cripto.",
         investment: "$25,000",
         investmentLabel: "Inversion Inicial",
+        riskMultiplier: "2x",
+        riskMultiplierLabel: "Multiplicador de Riesgo Max",
         features: [
           "Perfil de riesgo conservador",
           "Hasta 50 cuentas de clientes",
+          "Multiplicador de riesgo hasta 2x",
           "Programa de capacitacion basico",
           "Soporte por email",
           "Kit de marketing inicial"
@@ -335,9 +409,12 @@ const translations = {
         description: "Ideal para negocios establecidos que buscan expandir sus servicios financieros.",
         investment: "$75,000",
         investmentLabel: "Inversion Inicial",
+        riskMultiplier: "3x",
+        riskMultiplierLabel: "Multiplicador de Riesgo Max",
         features: [
           "Perfiles Conservador y Moderado",
           "Hasta 200 cuentas de clientes",
+          "Multiplicador de riesgo hasta 3x",
           "Programa de capacitacion avanzado",
           "Soporte prioritario telefono y email",
           "Suite completa de marketing",
@@ -350,14 +427,37 @@ const translations = {
         description: "Para operaciones a gran escala con maxima flexibilidad y beneficios premium.",
         investment: "$150,000",
         investmentLabel: "Inversion Inicial",
+        riskMultiplier: "4x",
+        riskMultiplierLabel: "Multiplicador de Riesgo Max",
         features: [
           "Todos los perfiles de riesgo",
           "Cuentas de clientes ilimitadas",
+          "Multiplicador de riesgo hasta 4x",
           "Programa de capacitacion ejecutivo",
           "Soporte dedicado 24/7",
           "Opciones de marca personalizada",
           "Exclusividad multi-region",
           "Posibilidades de marca blanca"
+        ],
+        cta: "Contactar Ventas"
+      },
+      master: {
+        name: "Master",
+        badge: "Premium",
+        description: "Para maestros de territorio con control operacional completo y beneficios maximos.",
+        investment: "$300,000",
+        investmentLabel: "Inversion Inicial",
+        riskMultiplier: "5x",
+        riskMultiplierLabel: "Multiplicador de Riesgo Max",
+        features: [
+          "Todos los perfiles + acceso Master",
+          "Cuentas de clientes ilimitadas",
+          "Multiplicador de riesgo hasta 5x",
+          "Capacitacion ejecutiva + mentoria",
+          "Soporte VIP 24/7",
+          "Derechos de territorio exclusivo",
+          "Capacidades de marca blanca",
+          "Gestion de sub-franquicias"
         ],
         cta: "Contactar Ventas"
       }
@@ -447,6 +547,65 @@ const translations = {
       subtitle: "Unete a la red DELFOS y se parte del futuro del trading cripto automatizado.",
       button: "Aplicar Ahora"
     },
+    accessPortal: {
+      title: "Portal de Acceso",
+      subtitle: "Ya eres socio DELFOS? Accede a tu panel exclusivo.",
+      franchisor: "Franquiciadora",
+      franchisorDesc: "Panel de gestion y gobernanza de la red global.",
+      master: "Master Franquicia",
+      masterDesc: "Gestion de territorios regionales y supervision.",
+      franchise: "Franquicia",
+      franchiseDesc: "Operaciones diarias y gestion de clientes.",
+      accessButton: "Acceder"
+    },
+    technology: {
+      title: "Tecnologia de Vanguardia",
+      subtitle: "Un ecosistema completo que automatiza cada aspecto del trading profesional.",
+      items: [
+        {
+          icon: "Brain",
+          title: "IA Autonoma",
+          description: "Sistema de trading que aprende y se adapta a las condiciones del mercado en tiempo real."
+        },
+        {
+          icon: "Activity",
+          title: "Analisis de Volatilidad",
+          description: "Motor de clasificacion inteligente de 4 niveles para ajuste automatico de estrategias."
+        },
+        {
+          icon: "Layers",
+          title: "Campanas Inteligentes",
+          description: "Ciclos de 30 dias con composicion diaria y gestion de posiciones aisladas."
+        },
+        {
+          icon: "Sparkles",
+          title: "Aprendizaje Continuo",
+          description: "Sistema de descubrimiento de patrones que mejora constantemente el rendimiento."
+        }
+      ]
+    },
+    capitalProtection: {
+      title: "Proteccion de Capital",
+      subtitle: "La seguridad de tus clientes es nuestra prioridad. Sistema de proteccion multicapa.",
+      items: [
+        {
+          title: "Seguridad Multicapa",
+          description: "Circuit breakers automaticos que detienen operaciones en condiciones adversas."
+        },
+        {
+          title: "6 Validaciones Automaticas",
+          description: "Quality gate que verifica cada operacion antes de su ejecucion."
+        },
+        {
+          title: "Auto-Rollback",
+          description: "Proteccion automatica que revierte configuraciones de riesgo si es necesario."
+        },
+        {
+          title: "Multiplicador de Riesgo",
+          description: "Sistema progresivo de 2x a 5x con desbloqueo por cumplimiento de tareas."
+        }
+      ]
+    },
     footer: {
       copyright: "DELFOS - Oraculo del Trading. Red Profesional de Franquicias de Trading Cripto.",
       links: {
@@ -475,10 +634,10 @@ const translations = {
       contact: "Contato"
     },
     hero: {
-      badge: "Rede de Franquias DELFOS",
-      title: "Faca Parte do",
-      titleHighlight: "Futuro do Trading Cripto",
-      subtitle: "Junte-se a rede de franquias DELFOS e ofereca aos seus clientes tecnologia de trading com IA de ponta. Baixo investimento inicial, alto potencial de crescimento.",
+      badge: "Plataforma Institucional de Trading V2.0+",
+      title: "Trading Autonomo",
+      titleHighlight: "Movido por Inteligencia Artificial",
+      subtitle: "Ofereca aos seus clientes uma plataforma de trading profissional com protecao de risco multicamada, campanhas inteligentes e aprendizado continuo de IA. Tecnologia que trabalha para voce 24/7.",
       cta: "Seja um Franqueado",
       ctaSecondary: "Saiba Mais"
     },
@@ -526,9 +685,12 @@ const translations = {
         description: "Perfeito para empreendedores iniciando sua jornada em servicos de trading cripto.",
         investment: "$25,000",
         investmentLabel: "Investimento Inicial",
+        riskMultiplier: "2x",
+        riskMultiplierLabel: "Multiplicador de Risco Max",
         features: [
           "Perfil de risco conservador",
           "Ate 50 contas de clientes",
+          "Multiplicador de risco ate 2x",
           "Programa de treinamento basico",
           "Suporte por email",
           "Kit de marketing inicial"
@@ -541,9 +703,12 @@ const translations = {
         description: "Ideal para negocios estabelecidos que buscam expandir seus servicos financeiros.",
         investment: "$75,000",
         investmentLabel: "Investimento Inicial",
+        riskMultiplier: "3x",
+        riskMultiplierLabel: "Multiplicador de Risco Max",
         features: [
           "Perfis Conservador e Moderado",
           "Ate 200 contas de clientes",
+          "Multiplicador de risco ate 3x",
           "Programa de treinamento avancado",
           "Suporte prioritario telefone e email",
           "Suite completa de marketing",
@@ -556,14 +721,37 @@ const translations = {
         description: "Para operacoes em grande escala com maxima flexibilidade e beneficios premium.",
         investment: "$150,000",
         investmentLabel: "Investimento Inicial",
+        riskMultiplier: "4x",
+        riskMultiplierLabel: "Multiplicador de Risco Max",
         features: [
           "Todos os perfis de risco",
           "Contas de clientes ilimitadas",
+          "Multiplicador de risco ate 4x",
           "Programa de treinamento executivo",
           "Suporte dedicado 24/7",
           "Opcoes de marca personalizada",
           "Exclusividade multi-regiao",
           "Possibilidades de white-label"
+        ],
+        cta: "Contatar Vendas"
+      },
+      master: {
+        name: "Master",
+        badge: "Premium",
+        description: "Para mestres de territorio com controle operacional completo e beneficios maximos.",
+        investment: "$300,000",
+        investmentLabel: "Investimento Inicial",
+        riskMultiplier: "5x",
+        riskMultiplierLabel: "Multiplicador de Risco Max",
+        features: [
+          "Todos os perfis + acesso Master",
+          "Contas de clientes ilimitadas",
+          "Multiplicador de risco ate 5x",
+          "Treinamento executivo + mentoria",
+          "Suporte VIP 24/7",
+          "Direitos de territorio exclusivo",
+          "Capacidades white-label",
+          "Gestao de sub-franquias"
         ],
         cta: "Contatar Vendas"
       }
@@ -653,6 +841,65 @@ const translations = {
       subtitle: "Junte-se a rede DELFOS e faca parte do futuro do trading cripto automatizado.",
       button: "Aplicar Agora"
     },
+    accessPortal: {
+      title: "Portal de Acesso",
+      subtitle: "Ja e parceiro DELFOS? Acesse seu painel exclusivo.",
+      franchisor: "Franqueadora",
+      franchisorDesc: "Painel de gestao e governanca da rede global.",
+      master: "Master Franquia",
+      masterDesc: "Gestao de territorios regionais e supervisao.",
+      franchise: "Franquia",
+      franchiseDesc: "Operacoes diarias e gestao de clientes.",
+      accessButton: "Acessar"
+    },
+    technology: {
+      title: "Tecnologia de Ponta",
+      subtitle: "Um ecossistema completo que automatiza cada aspecto do trading profissional.",
+      items: [
+        {
+          icon: "Brain",
+          title: "IA Autonoma",
+          description: "Sistema de trading que aprende e se adapta as condicoes do mercado em tempo real."
+        },
+        {
+          icon: "Activity",
+          title: "Analise de Volatilidade",
+          description: "Motor de classificacao inteligente de 4 niveis para ajuste automatico de estrategias."
+        },
+        {
+          icon: "Layers",
+          title: "Campanhas Inteligentes",
+          description: "Ciclos de 30 dias com composicao diaria e gestao de posicoes isoladas."
+        },
+        {
+          icon: "Sparkles",
+          title: "Aprendizado Continuo",
+          description: "Sistema de descoberta de padroes que melhora constantemente o desempenho."
+        }
+      ]
+    },
+    capitalProtection: {
+      title: "Protecao de Capital",
+      subtitle: "A seguranca dos seus clientes e nossa prioridade. Sistema de protecao multicamada.",
+      items: [
+        {
+          title: "Seguranca Multicamada",
+          description: "Circuit breakers automaticos que interrompem operacoes em condicoes adversas."
+        },
+        {
+          title: "6 Validacoes Automaticas",
+          description: "Quality gate que verifica cada operacao antes da execucao."
+        },
+        {
+          title: "Auto-Rollback",
+          description: "Protecao automatica que reverte configuracoes de risco se necessario."
+        },
+        {
+          title: "Multiplicador de Risco",
+          description: "Sistema progressivo de 2x a 5x com desbloqueio por cumprimento de tarefas."
+        }
+      ]
+    },
     footer: {
       copyright: "DELFOS - Oraculo do Trading. Rede Profissional de Franquias de Trading Cripto.",
       links: {
@@ -685,7 +932,8 @@ const iconMap: Record<string, typeof Bot> = {
   HeadphonesIcon,
   GraduationCap,
   DollarSign,
-  Users
+  Users,
+  Sparkles
 };
 
 function ThemeToggle() {
@@ -748,59 +996,75 @@ function LanguageSelector() {
   );
 }
 
+interface FranchisePlan {
+  id: string;
+  name: string;
+  code: string;
+  franchise_fee_usd: string;
+  max_rbm_multiplier: string;
+  is_active: boolean;
+}
+
 export default function Landing() {
   const { language } = useLanguage();
   const { toast } = useToast();
+  const [, setLocation] = useLocation();
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
-  const [isContactFormOpen, setIsContactFormOpen] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [formData, setFormData] = useState({
-    name: '',
-    email: '',
-    phone: '',
-    country: '',
-    investment: 'starter',
-    message: ''
-  });
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
   const content = translations[language as keyof typeof translations] || translations.en;
 
-  const handleLogin = () => {
-    window.location.href = '/api/login';
+  const { data: plans, isLoading: plansLoading } = useQuery<FranchisePlan[]>({
+    queryKey: ['/api/franchise-plans'],
+  });
+
+  const handleLogin = async () => {
+    if (!email || !password) {
+      toast({ title: "Error", description: "Email and password required", variant: "destructive" });
+      return;
+    }
+    
+    setIsLoggingIn(true);
+    try {
+      const response = await fetch('/api/franchisor-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      
+      if (!response.ok) {
+        throw new Error('Invalid credentials');
+      }
+      
+      const data = await response.json();
+      localStorage.setItem('franchisor_token', data.token);
+      localStorage.setItem('franchisor_user', JSON.stringify(data.user));
+      setIsLoginModalOpen(false);
+      setEmail('');
+      setPassword('');
+      setLocation('/franchisor-dashboard');
+      toast({ title: "Success", description: "Welcome back!" });
+    } catch (error) {
+      toast({ title: "Error", description: "Login failed", variant: "destructive" });
+    } finally {
+      setIsLoggingIn(false);
+    }
   };
 
   const scrollToSection = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const handleFormChange = (field: string, value: string) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
+  const handleSelectPlan = (planCode: string) => {
+    setLocation(`/franchise/onboarding?plan=${planCode}`);
   };
 
-  const handleFormSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    
-    if (!formData.name || !formData.email) {
-      toast({
-        title: language === 'pt-BR' ? 'Campos obrigatorios' : language === 'es' ? 'Campos requeridos' : 'Required fields',
-        description: language === 'pt-BR' ? 'Por favor, preencha nome e email.' : language === 'es' ? 'Por favor, complete nombre y email.' : 'Please fill in name and email.',
-        variant: 'destructive'
-      });
-      return;
-    }
-
-    setIsSubmitting(true);
-    
-    // Simulate API call (in production this would POST to an endpoint)
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    toast({
-      title: language === 'pt-BR' ? 'Solicitacao enviada!' : language === 'es' ? 'Solicitud enviada!' : 'Request submitted!',
-      description: language === 'pt-BR' ? 'Nossa equipe entrara em contato em breve.' : language === 'es' ? 'Nuestro equipo se comunicara pronto.' : 'Our team will contact you soon.',
-    });
-    
-    setFormData({ name: '', email: '', phone: '', country: '', investment: 'starter', message: '' });
-    setIsContactFormOpen(false);
-    setIsSubmitting(false);
+  const getPlanColor = (code: string) => {
+    if (code === 'starter') return { bg: 'bg-green-500', text: 'text-green-500', light: 'bg-green-500/10', lightText: 'text-green-600', icon: Shield };
+    if (code === 'pro') return { bg: 'bg-[#5B9FB5]', text: 'text-[#5B9FB5]', light: 'bg-[#5B9FB5]/10', lightText: 'text-[#5B9FB5]', icon: Target, isMostPopular: true };
+    if (code === 'enterprise') return { bg: 'bg-orange-500', text: 'text-orange-500', light: 'bg-orange-500/10', lightText: 'text-orange-600', icon: Building2 };
+    return { bg: 'bg-gray-500', text: 'text-gray-500', light: 'bg-gray-500/10', lightText: 'text-gray-600', icon: Shield };
   };
 
   return (
@@ -813,145 +1077,43 @@ export default function Landing() {
               <DelfosLogo variant="icon" className="w-16 h-16" />
             </div>
             <DialogTitle className="text-2xl font-bold">
-              {content.loginModal.title}
+              Acesso Franqueadora
             </DialogTitle>
             <DialogDescription className="text-base mt-2">
-              {content.loginModal.description}
+              Faça login com suas credenciais
             </DialogDescription>
           </DialogHeader>
           
-          <div className="py-4">
-            <ul className="space-y-3">
-              {content.loginModal.features.map((feature, index) => (
-                <li key={index} className="flex items-center gap-3 text-sm text-muted-foreground">
-                  <CheckCircle2 className="w-4 h-4 text-[#5B9FB5] flex-shrink-0" />
-                  {feature}
-                </li>
-              ))}
-            </ul>
+          <div className="space-y-4 py-4">
+            <input
+              type="email"
+              placeholder="Email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full px-3 py-2 border border-input rounded-md text-sm"
+              data-testid="input-franchisor-email"
+            />
+            <input
+              type="password"
+              placeholder="Senha"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-input rounded-md text-sm"
+              onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
+              data-testid="input-franchisor-password"
+            />
           </div>
           
           <Button
             size="lg"
             className="w-full py-6 text-lg bg-gradient-to-r from-[#5B9FB5] to-[#7DD3E8] hover:from-[#4A8EA4] hover:to-[#6CC2D7] text-white"
             onClick={handleLogin}
+            disabled={isLoggingIn}
             data-testid="button-login-modal"
           >
             <LogIn className="w-5 h-5 mr-2" />
-            {content.loginModal.button}
-            <ExternalLink className="w-4 h-4 ml-2" />
+            {isLoggingIn ? "Autenticando..." : "Entrar"}
           </Button>
-          
-          <p className="text-xs text-center text-muted-foreground mt-2">
-            <Lock className="w-3 h-3 inline mr-1" />
-            {content.loginModal.note}
-          </p>
-        </DialogContent>
-      </Dialog>
-
-      {/* Contact Form Modal */}
-      <Dialog open={isContactFormOpen} onOpenChange={setIsContactFormOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle className="text-2xl font-bold flex items-center gap-2">
-              <Building2 className="w-6 h-6 text-[#5B9FB5]" />
-              {content.contact.title}
-            </DialogTitle>
-            <DialogDescription>
-              {content.contact.subtitle}
-            </DialogDescription>
-          </DialogHeader>
-          
-          <form className="space-y-4 mt-4" onSubmit={handleFormSubmit}>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="modal-name">{content.contact.form.name}</Label>
-                <Input 
-                  id="modal-name" 
-                  placeholder="John Doe" 
-                  value={formData.name}
-                  onChange={(e) => handleFormChange('name', e.target.value)}
-                  data-testid="input-contact-name" 
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="modal-email">{content.contact.form.email}</Label>
-                <Input 
-                  id="modal-email" 
-                  type="email" 
-                  placeholder="john@example.com" 
-                  value={formData.email}
-                  onChange={(e) => handleFormChange('email', e.target.value)}
-                  data-testid="input-contact-email" 
-                />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="modal-phone">{content.contact.form.phone}</Label>
-                <Input 
-                  id="modal-phone" 
-                  placeholder="+1 234 567 890" 
-                  value={formData.phone}
-                  onChange={(e) => handleFormChange('phone', e.target.value)}
-                  data-testid="input-contact-phone" 
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="modal-country">{content.contact.form.country}</Label>
-                <Input 
-                  id="modal-country" 
-                  placeholder="United States" 
-                  value={formData.country}
-                  onChange={(e) => handleFormChange('country', e.target.value)}
-                  data-testid="input-contact-country" 
-                />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="modal-investment">{content.contact.form.investment}</Label>
-              <select 
-                id="modal-investment" 
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                value={formData.investment}
-                onChange={(e) => handleFormChange('investment', e.target.value)}
-                data-testid="select-contact-investment"
-              >
-                <option value="starter">{content.contact.form.investmentOptions.starter}</option>
-                <option value="pro">{content.contact.form.investmentOptions.pro}</option>
-                <option value="enterprise">{content.contact.form.investmentOptions.enterprise}</option>
-              </select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="modal-message">{content.contact.form.message}</Label>
-              <Textarea 
-                id="modal-message" 
-                placeholder="Tell us about your experience and goals..."
-                className="min-h-[100px]"
-                value={formData.message}
-                onChange={(e) => handleFormChange('message', e.target.value)}
-                data-testid="textarea-contact-message"
-              />
-            </div>
-            <Button 
-              type="submit" 
-              className="w-full bg-gradient-to-r from-[#5B9FB5] to-[#7DD3E8] hover:from-[#4A8EA4] hover:to-[#6CC2D7] text-white"
-              disabled={isSubmitting}
-              data-testid="button-contact-submit"
-            >
-              {isSubmitting ? (
-                <span className="flex items-center gap-2">
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  {language === 'pt-BR' ? 'Enviando...' : language === 'es' ? 'Enviando...' : 'Sending...'}
-                </span>
-              ) : (
-                <>
-                  {content.contact.form.submit}
-                  <ArrowRight className="w-4 h-4 ml-2" />
-                </>
-              )}
-            </Button>
-          </form>
         </DialogContent>
       </Dialog>
 
@@ -1056,7 +1218,7 @@ export default function Landing() {
                 <Button
                   size="lg"
                   className="px-8 py-6 text-lg bg-gradient-to-r from-[#5B9FB5] to-[#7DD3E8] hover:from-[#4A8EA4] hover:to-[#6CC2D7] text-white shadow-lg shadow-[#5B9FB5]/25"
-                  onClick={() => setIsContactFormOpen(true)}
+                  onClick={() => scrollToSection('plans')}
                   data-testid="button-cta-hero"
                 >
                   <Rocket className="mr-2 w-5 h-5" />
@@ -1166,6 +1328,95 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* Technology Section V2.0+ */}
+      <section id="technology" className="py-20 sm:py-24 bg-gradient-to-br from-[#1A1D23] via-[#2A3040] to-[#1A1D23] relative overflow-hidden">
+        <div className="absolute inset-0 opacity-5">
+          <div className="absolute inset-0" style={{
+            backgroundImage: `linear-gradient(to right, #5B9FB5 1px, transparent 1px),
+                             linear-gradient(to bottom, #5B9FB5 1px, transparent 1px)`,
+            backgroundSize: '40px 40px'
+          }} />
+        </div>
+        <div className="absolute top-1/3 left-1/4 w-64 h-64 bg-[#5B9FB5]/10 rounded-full blur-3xl" />
+        <div className="absolute bottom-1/3 right-1/4 w-48 h-48 bg-[#7DD3E8]/10 rounded-full blur-3xl" />
+        
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
+          <div className="text-center mb-16">
+            <Badge variant="outline" className="mb-4 border-[#7DD3E8]/50 text-[#7DD3E8] bg-[#7DD3E8]/10">
+              <Zap className="w-4 h-4 mr-2" />
+              V2.0+
+            </Badge>
+            <h2 className="text-3xl sm:text-4xl font-bold text-white mb-4">
+              {(content as any).technology?.title || "Cutting-Edge Technology"}
+            </h2>
+            <p className="text-lg text-white/70 max-w-2xl mx-auto">
+              {(content as any).technology?.subtitle || "A complete ecosystem that automates every aspect of professional trading."}
+            </p>
+          </div>
+          
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            {((content as any).technology?.items || []).map((item: any, index: number) => {
+              const IconComponent = iconMap[item.icon] || Bot;
+              return (
+                <Card 
+                  key={index} 
+                  className="p-6 bg-white/5 border-white/10 backdrop-blur-sm hover-elevate"
+                  data-testid={`card-technology-${index}`}
+                >
+                  <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-[#5B9FB5] to-[#7DD3E8] flex items-center justify-center mb-4 shadow-lg shadow-[#5B9FB5]/25">
+                    <IconComponent className="w-7 h-7 text-white" />
+                  </div>
+                  <h3 className="text-lg font-semibold text-white mb-2">
+                    {item.title}
+                  </h3>
+                  <p className="text-sm text-white/60 leading-relaxed">
+                    {item.description}
+                  </p>
+                </Card>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* Capital Protection Section */}
+      <section id="protection" className="py-20 sm:py-24 bg-background">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="text-center mb-16">
+            <Badge variant="outline" className="mb-4 border-green-500/50 text-green-500">
+              <Shield className="w-4 h-4 mr-2" />
+              {language === 'pt-BR' ? 'Seguranca' : language === 'es' ? 'Seguridad' : 'Security'}
+            </Badge>
+            <h2 className="text-3xl sm:text-4xl font-bold text-foreground mb-4">
+              {(content as any).capitalProtection?.title || "Capital Protection"}
+            </h2>
+            <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
+              {(content as any).capitalProtection?.subtitle || "Your clients' security is our priority."}
+            </p>
+          </div>
+          
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            {((content as any).capitalProtection?.items || []).map((item: any, index: number) => (
+              <Card 
+                key={index} 
+                className="p-6 border-green-500/20 bg-green-500/5 hover-elevate"
+                data-testid={`card-protection-${index}`}
+              >
+                <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center mb-4">
+                  <CheckCircle2 className="w-5 h-5 text-green-500" />
+                </div>
+                <h3 className="text-lg font-semibold text-foreground mb-2">
+                  {item.title}
+                </h3>
+                <p className="text-sm text-muted-foreground leading-relaxed">
+                  {item.description}
+                </p>
+              </Card>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {/* How It Works Section */}
       <section className="py-20 sm:py-24 bg-muted/30">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -1213,115 +1464,87 @@ export default function Landing() {
             </p>
           </div>
           
-          <div className="grid lg:grid-cols-3 gap-8">
-            {/* Starter Plan */}
-            <Card className="p-8 border-border/50 bg-card hover-elevate relative" data-testid="card-plan-starter">
-              <div className="mb-6">
-                <div className="w-12 h-12 rounded-xl bg-green-500/20 flex items-center justify-center mb-4">
-                  <Shield className="w-6 h-6 text-green-500" />
-                </div>
-                <h3 className="text-2xl font-bold text-foreground mb-2">{content.plans.starter.name}</h3>
-                <p className="text-sm text-muted-foreground">{content.plans.starter.description}</p>
-              </div>
-              
-              <div className="mb-6">
-                <div className="text-4xl font-bold text-foreground mb-1">{content.plans.starter.investment}</div>
-                <div className="text-sm text-muted-foreground">{content.plans.starter.investmentLabel}</div>
-              </div>
-              
-              <ul className="space-y-3 mb-8">
-                {content.plans.starter.features.map((feature, index) => (
-                  <li key={index} className="flex items-center gap-3 text-sm text-muted-foreground">
-                    <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />
-                    {feature}
-                  </li>
-                ))}
-              </ul>
-              
-              <Button 
-                className="w-full"
-                variant="outline"
-                onClick={() => setIsContactFormOpen(true)}
-                data-testid="button-plan-starter"
-              >
-                {content.plans.starter.cta}
-                <ArrowRight className="w-4 h-4 ml-2" />
-              </Button>
-            </Card>
+          {plansLoading ? (
+            <div className="flex justify-center items-center min-h-96">
+              <Loader2 className="w-8 h-8 animate-spin text-[#5B9FB5]" />
+            </div>
+          ) : (
+            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {plans?.map((plan) => {
+                const colors = getPlanColor(plan.code);
+                const IconComponent = colors.icon;
+                const isMostPopular = colors.isMostPopular;
+                const fee = parseFloat(plan.franchise_fee_usd);
+                const feeStr = language === 'pt-BR' 
+                  ? `R$ ${(fee * 5.5).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
+                  : `$${fee.toLocaleString()}`;
+                const planConfig = content.plans[plan.code as keyof typeof content.plans] as any;
+                const description = planConfig?.description || 'Professional franchise plan';
+                const features = planConfig?.features || [];
+                const cta = planConfig?.cta || 'Select Plan';
 
-            {/* Pro Plan */}
-            <Card className="p-8 border-[#5B9FB5] bg-card relative ring-2 ring-[#5B9FB5]/20" data-testid="card-plan-pro">
-              <Badge className="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-r from-[#5B9FB5] to-[#7DD3E8]">
-                {content.plans.pro.badge}
-              </Badge>
-              
-              <div className="mb-6">
-                <div className="w-12 h-12 rounded-xl bg-[#5B9FB5]/20 flex items-center justify-center mb-4">
-                  <Target className="w-6 h-6 text-[#5B9FB5]" />
-                </div>
-                <h3 className="text-2xl font-bold text-foreground mb-2">{content.plans.pro.name}</h3>
-                <p className="text-sm text-muted-foreground">{content.plans.pro.description}</p>
-              </div>
-              
-              <div className="mb-6">
-                <div className="text-4xl font-bold text-foreground mb-1">{content.plans.pro.investment}</div>
-                <div className="text-sm text-muted-foreground">{content.plans.pro.investmentLabel}</div>
-              </div>
-              
-              <ul className="space-y-3 mb-8">
-                {content.plans.pro.features.map((feature, index) => (
-                  <li key={index} className="flex items-center gap-3 text-sm text-muted-foreground">
-                    <CheckCircle2 className="w-4 h-4 text-[#5B9FB5] flex-shrink-0" />
-                    {feature}
-                  </li>
-                ))}
-              </ul>
-              
-              <Button 
-                className="w-full bg-gradient-to-r from-[#5B9FB5] to-[#7DD3E8] hover:from-[#4A8EA4] hover:to-[#6CC2D7] text-white"
-                onClick={() => setIsContactFormOpen(true)}
-                data-testid="button-plan-pro"
-              >
-                {content.plans.pro.cta}
-                <ArrowRight className="w-4 h-4 ml-2" />
-              </Button>
-            </Card>
-
-            {/* Enterprise Plan */}
-            <Card className="p-8 border-border/50 bg-card hover-elevate relative" data-testid="card-plan-enterprise">
-              <div className="mb-6">
-                <div className="w-12 h-12 rounded-xl bg-orange-500/20 flex items-center justify-center mb-4">
-                  <Building2 className="w-6 h-6 text-orange-500" />
-                </div>
-                <h3 className="text-2xl font-bold text-foreground mb-2">{content.plans.enterprise.name}</h3>
-                <p className="text-sm text-muted-foreground">{content.plans.enterprise.description}</p>
-              </div>
-              
-              <div className="mb-6">
-                <div className="text-4xl font-bold text-foreground mb-1">{content.plans.enterprise.investment}</div>
-                <div className="text-sm text-muted-foreground">{content.plans.enterprise.investmentLabel}</div>
-              </div>
-              
-              <ul className="space-y-3 mb-8">
-                {content.plans.enterprise.features.map((feature, index) => (
-                  <li key={index} className="flex items-center gap-3 text-sm text-muted-foreground">
-                    <CheckCircle2 className="w-4 h-4 text-orange-500 flex-shrink-0" />
-                    {feature}
-                  </li>
-                ))}
-              </ul>
-              
-              <Button 
-                className="w-full"
-                variant="outline"
-                onClick={() => setIsContactFormOpen(true)}
-                data-testid="button-plan-enterprise"
-              >
-                {content.plans.enterprise.cta}
-                <ArrowRight className="w-4 h-4 ml-2" />
-              </Button>
-            </Card>
-          </div>
+                return (
+                  <Card 
+                    key={plan.id}
+                    className={`p-6 relative ${
+                      isMostPopular 
+                        ? 'border-[#5B9FB5] bg-card ring-2 ring-[#5B9FB5]/20' 
+                        : 'border-border/50 bg-card hover-elevate'
+                    }`}
+                    data-testid={`card-plan-${plan.code}`}
+                  >
+                    {isMostPopular && (
+                      <Badge className="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-r from-[#5B9FB5] to-[#7DD3E8] text-xs">
+                        {content.plans.pro.badge}
+                      </Badge>
+                    )}
+                    
+                    <div className={`mb-4 ${isMostPopular ? 'mt-2' : ''}`}>
+                      <div className={`w-10 h-10 rounded-xl ${colors.light} flex items-center justify-center mb-3`}>
+                        <IconComponent className={`w-5 h-5 ${colors.text}`} />
+                      </div>
+                      <h3 className="text-xl font-bold text-foreground mb-1">{plan.name}</h3>
+                      <p className="text-xs text-muted-foreground">{description}</p>
+                    </div>
+                    
+                    <div className="mb-2">
+                      <div className="text-2xl font-bold text-foreground">{feeStr}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {language === 'pt-BR' ? 'Taxa de Franquia' : language === 'es' ? 'Tarifa de Franquicia' : 'Franchise Fee'}
+                      </div>
+                    </div>
+                    
+                    <div className={`mb-4 py-2 px-3 ${colors.light} rounded-lg`}>
+                      <div className={`text-lg font-bold ${colors.text}`}>{plan.max_rbm_multiplier}x</div>
+                      <div className={`text-xs ${colors.lightText}`}>
+                        {language === 'pt-BR' ? 'Multiplicador de Risco Máximo' : language === 'es' ? 'Multiplicador de Riesgo Máximo' : 'Max Risk Multiplier'}
+                      </div>
+                    </div>
+                    
+                    <ul className="space-y-2 mb-6">
+                      {features.map((feature: string, index: number) => (
+                        <li key={index} className="flex items-start gap-2 text-xs text-muted-foreground">
+                          <CheckCircle2 className={`w-3 h-3 ${colors.text} flex-shrink-0 mt-0.5`} />
+                          {feature}
+                        </li>
+                      ))}
+                    </ul>
+                    
+                    <Button 
+                      className={isMostPopular ? `w-full bg-gradient-to-r from-[#5B9FB5] to-[#7DD3E8] hover:from-[#4A8EA4] hover:to-[#6CC2D7] text-white` : 'w-full'}
+                      variant={isMostPopular ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => handleSelectPlan(plan.code)}
+                      data-testid={`button-plan-${plan.code}`}
+                    >
+                      {cta}
+                      <ArrowRight className="w-3 h-3 ml-1" />
+                    </Button>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
         </div>
       </section>
 
@@ -1389,96 +1612,30 @@ export default function Landing() {
             </div>
             
             <Card className="p-8 bg-card border-border/50">
-              <form className="space-y-4" onSubmit={handleFormSubmit}>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="inline-name">{content.contact.form.name}</Label>
-                    <Input 
-                      id="inline-name" 
-                      placeholder="John Doe" 
-                      value={formData.name}
-                      onChange={(e) => handleFormChange('name', e.target.value)}
-                      data-testid="input-inline-contact-name" 
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="inline-email">{content.contact.form.email}</Label>
-                    <Input 
-                      id="inline-email" 
-                      type="email" 
-                      placeholder="john@example.com" 
-                      value={formData.email}
-                      onChange={(e) => handleFormChange('email', e.target.value)}
-                      data-testid="input-inline-contact-email" 
-                    />
+              <div className="space-y-6">
+                <div>
+                  <h3 className="text-lg font-semibold text-foreground mb-2">{language === 'pt-BR' ? 'Horário de Atendimento' : language === 'es' ? 'Horario de Atención' : 'Business Hours'}</h3>
+                  <p className="text-sm text-muted-foreground">{language === 'pt-BR' ? 'Segunda a Sexta, 9h-18h (Horário de Brasília)' : language === 'es' ? 'Lunes a Viernes, 9:00-18:00 (Zona Horaria de Brasil)' : 'Monday to Friday, 9:00 AM - 6:00 PM (Brasilia Time)'}</p>
+                </div>
+                
+                <div>
+                  <h3 className="text-lg font-semibold text-foreground mb-4">{language === 'pt-BR' ? 'Redes Sociais' : language === 'es' ? 'Redes Sociales' : 'Follow Us'}</h3>
+                  <div className="flex gap-3">
+                    <Button size="sm" variant="outline" className="flex-1">{language === 'pt-BR' ? 'LinkedIn' : language === 'es' ? 'LinkedIn' : 'LinkedIn'}</Button>
+                    <Button size="sm" variant="outline" className="flex-1">{language === 'pt-BR' ? 'Twitter' : language === 'es' ? 'Twitter' : 'Twitter'}</Button>
+                    <Button size="sm" variant="outline" className="flex-1">{language === 'pt-BR' ? 'YouTube' : language === 'es' ? 'YouTube' : 'YouTube'}</Button>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="inline-phone">{content.contact.form.phone}</Label>
-                    <Input 
-                      id="inline-phone" 
-                      placeholder="+1 234 567 890" 
-                      value={formData.phone}
-                      onChange={(e) => handleFormChange('phone', e.target.value)}
-                      data-testid="input-inline-contact-phone" 
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="inline-country">{content.contact.form.country}</Label>
-                    <Input 
-                      id="inline-country" 
-                      placeholder="United States" 
-                      value={formData.country}
-                      onChange={(e) => handleFormChange('country', e.target.value)}
-                      data-testid="input-inline-contact-country" 
-                    />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="inline-investment">{content.contact.form.investment}</Label>
-                  <select 
-                    id="inline-investment" 
-                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    value={formData.investment}
-                    onChange={(e) => handleFormChange('investment', e.target.value)}
-                    data-testid="select-inline-contact-investment"
-                  >
-                    <option value="starter">{content.contact.form.investmentOptions.starter}</option>
-                    <option value="pro">{content.contact.form.investmentOptions.pro}</option>
-                    <option value="enterprise">{content.contact.form.investmentOptions.enterprise}</option>
-                  </select>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="inline-message">{content.contact.form.message}</Label>
-                  <Textarea 
-                    id="inline-message" 
-                    placeholder="Tell us about your experience and goals..."
-                    className="min-h-[100px]"
-                    value={formData.message}
-                    onChange={(e) => handleFormChange('message', e.target.value)}
-                    data-testid="textarea-inline-contact-message"
-                  />
-                </div>
+                
                 <Button 
-                  type="submit" 
                   className="w-full bg-gradient-to-r from-[#5B9FB5] to-[#7DD3E8] hover:from-[#4A8EA4] hover:to-[#6CC2D7] text-white"
-                  disabled={isSubmitting}
-                  data-testid="button-inline-contact-submit"
+                  onClick={() => scrollToSection('plans')}
+                  data-testid="button-contact-view-plans"
                 >
-                  {isSubmitting ? (
-                    <span className="flex items-center gap-2">
-                      <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      {language === 'pt-BR' ? 'Enviando...' : language === 'es' ? 'Enviando...' : 'Sending...'}
-                    </span>
-                  ) : (
-                    <>
-                      {content.contact.form.submit}
-                      <ArrowRight className="w-4 h-4 ml-2" />
-                    </>
-                  )}
+                  {language === 'pt-BR' ? 'Ver Planos de Franquia' : language === 'es' ? 'Ver Planes de Franquicia' : 'View Franchise Plans'}
+                  <ArrowRight className="w-4 h-4 ml-2" />
                 </Button>
-              </form>
+              </div>
             </Card>
           </div>
         </div>
@@ -1508,13 +1665,98 @@ export default function Landing() {
           <Button
             size="lg"
             className="px-10 py-6 text-lg bg-gradient-to-r from-[#5B9FB5] to-[#7DD3E8] hover:from-[#4A8EA4] hover:to-[#6CC2D7] text-white shadow-lg shadow-[#5B9FB5]/25"
-            onClick={() => setIsContactFormOpen(true)}
+            onClick={() => scrollToSection('plans')}
             data-testid="button-cta-final"
           >
             <Rocket className="mr-2 w-5 h-5" />
             {content.cta.button}
             <ArrowRight className="ml-2 w-5 h-5" />
           </Button>
+        </div>
+      </section>
+
+      {/* Access Portal Section */}
+      <section className="py-16 bg-gradient-to-b from-slate-900/50 via-slate-800/80 to-slate-900/50 border-y border-slate-700/50">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="text-center mb-10">
+            <div className="inline-flex items-center justify-center gap-2 bg-slate-700/50 rounded-full px-4 py-2 mb-4">
+              <LogIn className="w-5 h-5 text-cyan-400" />
+              <span className="text-sm font-medium text-cyan-400">{content.accessPortal.title}</span>
+            </div>
+            <h2 className="text-3xl md:text-4xl font-bold text-white mb-3">{content.accessPortal.title}</h2>
+            <p className="text-lg text-slate-300">{content.accessPortal.subtitle}</p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* Franchisor Access Card - Amber/Gold */}
+            <a href="/login/franchisor">
+              <Card 
+                className="relative overflow-visible border-2 border-amber-500/50 bg-slate-800/50 backdrop-blur cursor-pointer transition-all hover-elevate h-full"
+                data-testid="card-access-franchisor"
+              >
+                <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-amber-500 to-yellow-600" />
+                <div className="p-6 text-center">
+                  <div className="w-14 h-14 mx-auto rounded-full bg-gradient-to-r from-amber-500 to-yellow-600 flex items-center justify-center mb-4">
+                    <Crown className="w-7 h-7 text-white" />
+                  </div>
+                  <h3 className="text-xl font-semibold text-white mb-2">{content.accessPortal.franchisor}</h3>
+                  <p className="text-sm text-slate-300 mb-4">{content.accessPortal.franchisorDesc}</p>
+                  <Button 
+                    className="w-full bg-gradient-to-r from-amber-500 to-yellow-600"
+                    data-testid="button-access-franchisor"
+                  >
+                    {content.accessPortal.accessButton}
+                  </Button>
+                </div>
+              </Card>
+            </a>
+
+            {/* Master Franchise Access Card - Blue */}
+            <a href="/login/master">
+              <Card 
+                className="relative overflow-visible border-2 border-blue-500/50 bg-slate-800/50 backdrop-blur cursor-pointer transition-all hover-elevate h-full"
+                data-testid="card-access-master"
+              >
+                <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-600" />
+                <div className="p-6 text-center">
+                  <div className="w-14 h-14 mx-auto rounded-full bg-gradient-to-r from-blue-500 to-indigo-600 flex items-center justify-center mb-4">
+                    <Building2 className="w-7 h-7 text-white" />
+                  </div>
+                  <h3 className="text-xl font-semibold text-white mb-2">{content.accessPortal.master}</h3>
+                  <p className="text-sm text-slate-300 mb-4">{content.accessPortal.masterDesc}</p>
+                  <Button 
+                    className="w-full bg-gradient-to-r from-blue-500 to-indigo-600"
+                    data-testid="button-access-master"
+                  >
+                    {content.accessPortal.accessButton}
+                  </Button>
+                </div>
+              </Card>
+            </a>
+
+            {/* Franchise Access Card - Cyan */}
+            <a href="/login/franchise">
+              <Card 
+                className="relative overflow-visible border-2 border-cyan-500/50 bg-slate-800/50 backdrop-blur cursor-pointer transition-all hover-elevate h-full"
+                data-testid="card-access-franchise"
+              >
+                <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-cyan-500 to-teal-600" />
+                <div className="p-6 text-center">
+                  <div className="w-14 h-14 mx-auto rounded-full bg-gradient-to-r from-cyan-500 to-teal-600 flex items-center justify-center mb-4">
+                    <TrendingUp className="w-7 h-7 text-white" />
+                  </div>
+                  <h3 className="text-xl font-semibold text-white mb-2">{content.accessPortal.franchise}</h3>
+                  <p className="text-sm text-slate-300 mb-4">{content.accessPortal.franchiseDesc}</p>
+                  <Button 
+                    className="w-full bg-gradient-to-r from-cyan-500 to-teal-600"
+                    data-testid="button-access-franchise"
+                  >
+                    {content.accessPortal.accessButton}
+                  </Button>
+                </div>
+              </Card>
+            </a>
+          </div>
         </div>
       </section>
 
