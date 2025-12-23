@@ -3,11 +3,24 @@ import { QueryClient, QueryFunction } from "@tanstack/react-query";
 // Global flag to prevent multiple simultaneous login redirects
 let isRedirectingToLogin = false;
 
+// Check if we're on a persona login page where 401 is expected
+function isOnPersonaLoginPage(): boolean {
+  if (typeof window === 'undefined') return false;
+  const pathname = window.location.pathname;
+  const isPersonaLogin = pathname.includes('/login/franchisor') || 
+         pathname.includes('/login/master_franchise') || 
+         pathname.includes('/login/franchise');
+  if (isPersonaLogin) {
+    console.log('[AUTH] On persona login page:', pathname);
+  }
+  return isPersonaLogin;
+}
+
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
-    // Handle 401 Unauthorized - redirect to login (once)
+    // Handle 401 Unauthorized - redirect to login (once), except on persona login pages
     if (res.status === 401) {
-      if (!isRedirectingToLogin) {
+      if (!isRedirectingToLogin && !isOnPersonaLoginPage()) {
         isRedirectingToLogin = true;
         console.log('[AUTH] Unauthorized - redirecting to login');
         window.location.href = '/api/login';
@@ -99,10 +112,13 @@ export const getQueryFn: <T>(options: {
     // Handle 401 based on behavior setting
     if (res.status === 401) {
       if (unauthorizedBehavior === "returnNull") {
+        console.log('[AUTH] 401 received but returning null (on401=returnNull)');
         return null;
       }
-      // For "throw" behavior, redirect to login
-      if (!isRedirectingToLogin) {
+      // For "throw" behavior, redirect to login (except on persona login pages)
+      const onPersonaPage = isOnPersonaLoginPage();
+      console.log('[AUTH] 401 received, persona page:', onPersonaPage, 'already redirecting:', isRedirectingToLogin);
+      if (!isRedirectingToLogin && !onPersonaPage) {
         isRedirectingToLogin = true;
         console.log('[AUTH] Unauthorized - redirecting to login');
         window.location.href = '/api/login';
