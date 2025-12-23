@@ -1,6 +1,8 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import crypto from "crypto";
+import bcryptjs from "bcryptjs";
+import cookieParser from "cookie-parser";
 import { db } from "./db";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated } from "./replitAuth";
@@ -52,6 +54,7 @@ import {
   campaign_positions,
   users,
   franchise_plans,
+  franchise_leads,
   franchises,
   franchise_users,
   opportunity_blueprints,
@@ -59,8 +62,11 @@ import {
   franchisor_settings,
   contract_templates,
   contract_acceptances,
+  persona_credentials,
+  persona_sessions,
   insertContractTemplateSchema,
   insertFranchisorSettingsSchema,
+  franchisor_users,
 } from "@shared/schema";
 import { z } from "zod";
 import { eq, and, desc, sql, inArray, count, or } from "drizzle-orm";
@@ -360,6 +366,9 @@ function validateQueryLimit(limit: unknown): number | undefined {
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Setup cookie parser middleware for persona authentication sessions
+  app.use(cookieParser());
+  
   // Register object storage routes for file uploads
   registerObjectStorageRoutes(app);
   registerRBMRoutes(app);
@@ -468,6 +477,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Setup Replit Auth
   await setupAuth(app);
+
+  // Seed franchisor users (create if not exists)
+  try {
+    const existingFranchisor = await db.select().from(franchisor_users).where(eq(franchisor_users.email, 'itopaiva@hotmail.com')).limit(1);
+    if (existingFranchisor.length === 0) {
+      const passwordHash = await bcryptjs.hash('123456', 10);
+      await db.insert(franchisor_users).values({
+        email: 'itopaiva@hotmail.com',
+        password_hash: passwordHash,
+        name: 'RODERICO PAIXÃO LIMA',
+        cpf_cnpj: '343.915.413-00',
+        phone: '99-98214-8668',
+        role_title: 'SÓCIO PROPRIETÁRIO',
+        is_active: true,
+      });
+      console.log('✅ Franchisor user seeded: itopaiva@hotmail.com / 123456');
+      console.log('   Nome: RODERICO PAIXÃO LIMA');
+      console.log('   CPF: 343.915.413-00');
+      console.log('   Telefone: 99-98214-8668');
+      console.log('   Cargo: SÓCIO PROPRIETÁRIO');
+    }
+  } catch (error) {
+    console.log('[Seed] Franchisor users table may not exist yet or seed failed (this is OK on first run)');
+  }
 
   // Auth route - get current user
   app.get('/api/auth/user', isAuthenticated, async (req: any, res) => {
@@ -1428,6 +1461,49 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching market data:", error);
       res.status(500).json({ message: "Failed to fetch market data" });
+    }
+  });
+
+  // PUBLIC ENDPOINT: Get all symbols (no authentication required)
+  app.get('/api/symbols', async (req, res) => {
+    try {
+      const allSymbols = await storage.getAllSymbols();
+      res.json({
+        count: allSymbols.length,
+        symbols: allSymbols.map(s => ({
+          id: s.id,
+          symbol: s.symbol,
+          exchange_symbol: s.exchange_symbol,
+          is_active: s.is_active,
+        }))
+      });
+    } catch (error: any) {
+      console.error("Error fetching symbols:", error);
+      res.status(500).json({ message: "Failed to fetch symbols" });
+    }
+  });
+
+  // PUBLIC ENDPOINT: Get VRE status (no authentication required)
+  app.get('/api/vres', async (req, res) => {
+    try {
+      const vreData = await db.select().from(sql`vre_states`).limit(20);
+      res.json({
+        count: vreData.length,
+        regimes: vreData.map((item: any) => ({
+          symbol: item.symbol,
+          regime: item.regime,
+          confidence: item.confidence,
+          updated_at: item.updated_at
+        }))
+      });
+    } catch (error: any) {
+      console.error("Error fetching VRE data:", error);
+      // Fallback if table doesn't exist
+      res.json({
+        count: 0,
+        regimes: [],
+        message: "VRE data not yet initialized"
+      });
     }
   });
 
@@ -7739,6 +7815,119 @@ Provide your analysis as valid JSON.`;
     }
   });
 
+  // Create new franchise lead (Etapa 1 - Dados Pessoais)
+  app.post('/api/franchise-leads', async (req, res) => {
+    try {
+      const { franchise_leads } = await import("@shared/schema");
+      const { name, trade_name, document_type, document_number, secondary_document, birth_date, email, phone, whatsapp, address_street, address_number, address_complement, address_neighborhood, address_zip, address_city, address_country, plan_id } = req.body;
+      
+      if (!name || !document_number || !email || !plan_id) {
+        return res.status(400).json({ message: "Missing required fields" });
+      }
+
+      // CHECK FOR DUPLICATE: Same CPF/CNPJ with active registration
+      const existingLead = await db.select()
+        .from(franchise_leads)
+        .where(and(
+          eq(franchise_leads.document_number, document_number),
+          eq(franchise_leads.status, 'pending')
+        ))
+        .limit(1);
+
+      if (existingLead.length > 0) {
+        return res.status(409).json({ 
+          message: "Duplicate registration detected",
+          detail: `This CPF/CNPJ is already registered. Existing franchise code: ${existingLead[0].franchise_code}. Please use the existing registration or contact support.`,
+          duplicate_franchise_code: existingLead[0].franchise_code
+        });
+      }
+
+      const franchiseCode = `DELFOS-${Math.random().toString(36).substr(2, 8).toUpperCase()}`;
+      
+      const [newLead] = await db.insert(franchise_leads).values({
+        franchise_code: franchiseCode,
+        name,
+        trade_name,
+        document_type,
+        document_number,
+        secondary_document,
+        birth_date: birth_date ? new Date(birth_date) : undefined,
+        email,
+        phone,
+        whatsapp,
+        address_street,
+        address_number,
+        address_complement,
+        address_neighborhood,
+        address_zip,
+        address_city,
+        address_country,
+        plan_id,
+        status: "pending",
+        documents_uploaded: false,
+        auto_pre_approved: false,
+      }).returning();
+      
+      res.json({ id: newLead.id, franchise_code: newLead.franchise_code });
+    } catch (error: any) {
+      console.error("Error creating franchise lead:", error);
+      res.status(500).json({ message: error.message || "Failed to create franchise lead" });
+    }
+  });
+
+  // Accept contract (Etapa 4 - Contrato)
+  app.post('/api/franchise-leads/:leadId/accept-contract', async (req, res) => {
+    try {
+      const { leadId } = req.params;
+      const { contract_version } = req.body;
+      
+      if (!contract_version) {
+        return res.status(400).json({ message: "Contract version is required" });
+      }
+
+      // Update lead with contract acceptance
+      const updateData: any = { contract_version };
+      
+      // Only update accepted_at if the field exists
+      updateData.contract_accepted_at = new Date();
+      
+      const updatedLead = await db.update(franchise_leads)
+        .set(updateData)
+        .where(eq(franchise_leads.id, leadId))
+        .returning();
+
+      if (!updatedLead || updatedLead.length === 0) {
+        return res.status(404).json({ message: "Franchise lead not found" });
+      }
+
+      res.json({ success: true, message: "Contract accepted", leadId: leadId });
+    } catch (error: any) {
+      console.error("Error accepting contract:", error);
+      res.status(500).json({ message: error.message || "Failed to accept contract" });
+    }
+  });
+
+  // Get active contract template
+  app.get('/api/contract-templates/active', async (req, res) => {
+    try {
+      const { contract_templates } = await import("@shared/schema");
+      const template = await db.select()
+        .from(contract_templates)
+        .where(eq(contract_templates.is_active, true))
+        .orderBy(desc(contract_templates.created_at))
+        .limit(1);
+      
+      if (!template || template.length === 0) {
+        return res.status(404).json({ message: "No active contract template found" });
+      }
+      
+      res.json(template[0]);
+    } catch (error: any) {
+      console.error("Error fetching contract template:", error);
+      res.status(500).json({ message: error.message || "Failed to fetch contract template" });
+    }
+  });
+
   // ========== STRIPE PAYMENT ROUTES FOR FRANCHISE ONBOARDING ==========
   
   // Get Stripe publishable key (public, required for frontend)
@@ -8452,6 +8641,242 @@ Provide your analysis as valid JSON.`;
       res.json({ message: "User removed successfully" });
     } catch (error) {
       console.error("Error removing franchise user:", error);
+      res.status(500).json({ message: "Failed to remove user" });
+    }
+  });
+
+  // ========== FRANCHISOR USERS MANAGEMENT ==========
+  
+  // POST /api/franchisor/users - Add user to franchisor
+  app.post('/api/franchisor/users', isAuthenticated, async (req: any, res) => {
+    try {
+      const currentUserId = req.user.claims.sub;
+      const currentUserEmail = req.user.claims.email;
+      const { email, role } = req.body;
+      
+      if (!email || !role) {
+        return res.status(400).json({ message: "Email and role are required" });
+      }
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(currentUserId, currentUserEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      // Find or create user
+      let [targetUser] = await db.select().from(users).where(eq(users.email, email.toLowerCase()));
+      if (!targetUser) {
+        const [newUser] = await db.insert(users).values({
+          email: email.toLowerCase(),
+          is_beta_approved: true,
+          global_role: 'user',
+          preferred_language: 'pt-BR',
+          notifications_enabled: true,
+        }).returning();
+        targetUser = newUser;
+      }
+      
+      // Add to franchisor_users
+      const [newLink] = await db.insert(franchisor_users).values({
+        user_id: targetUser.id,
+        role: role as 'admin' | 'manager' | 'operator',
+        is_active: true,
+        invited_by: currentUserId,
+      }).returning();
+      
+      res.json({
+        ...newLink,
+        user_email: targetUser.email,
+      });
+    } catch (error) {
+      console.error("Error adding franchisor user:", error);
+      res.status(500).json({ message: "Failed to add user" });
+    }
+  });
+
+  // PATCH /api/franchisor/users/:userId - Update franchisor user
+  app.patch('/api/franchisor/users/:userId', isAuthenticated, async (req: any, res) => {
+    try {
+      const currentUserId = req.user.claims.sub;
+      const currentUserEmail = req.user.claims.email;
+      const targetUserId = req.params.userId;
+      const { role, is_active } = req.body;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(currentUserId, currentUserEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      const [existingLink] = await db.select().from(franchisor_users).where(eq(franchisor_users.user_id, targetUserId));
+      if (!existingLink) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      const updateData: any = { updated_at: new Date() };
+      if (role !== undefined) updateData.role = role;
+      if (is_active !== undefined) updateData.is_active = is_active;
+      
+      const [updated] = await db.update(franchisor_users).set(updateData).where(eq(franchisor_users.id, existingLink.id)).returning();
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating franchisor user:", error);
+      res.status(500).json({ message: "Failed to update user" });
+    }
+  });
+
+  // DELETE /api/franchisor/users/:userId - Remove franchisor user
+  app.delete('/api/franchisor/users/:userId', isAuthenticated, async (req: any, res) => {
+    try {
+      const currentUserId = req.user.claims.sub;
+      const currentUserEmail = req.user.claims.email;
+      const targetUserId = req.params.userId;
+      
+      const { franchisePermissionService } = await import('./services/franchisePermissionService');
+      const permissions = await franchisePermissionService.getUserPermissions(currentUserId, currentUserEmail);
+      
+      if (!permissions.isFranchisor) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      const [existingLink] = await db.select().from(franchisor_users).where(eq(franchisor_users.user_id, targetUserId));
+      if (!existingLink) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      await db.delete(franchisor_users).where(eq(franchisor_users.id, existingLink.id));
+      
+      res.json({ message: "User removed successfully" });
+    } catch (error) {
+      console.error("Error removing franchisor user:", error);
+      res.status(500).json({ message: "Failed to remove user" });
+    }
+  });
+
+  // ========== MASTER FRANCHISE USERS MANAGEMENT ==========
+  
+  // POST /api/master/users - Add user to master franchise
+  app.post('/api/master/users', isAuthenticated, async (req: any, res) => {
+    try {
+      const currentUserId = req.user.claims.sub;
+      const { email, role } = req.body;
+      
+      if (!email || !role) {
+        return res.status(400).json({ message: "Email and role are required" });
+      }
+      
+      // Check if user is master franchise user
+      const [isMaster] = await db.select().from(franchise_users).where(and(
+        eq(franchise_users.user_id, currentUserId),
+        eq(franchise_users.role, 'master'),
+        eq(franchise_users.is_active, true)
+      ));
+      
+      if (!isMaster) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      // Find or create user
+      let [targetUser] = await db.select().from(users).where(eq(users.email, email.toLowerCase()));
+      if (!targetUser) {
+        const [newUser] = await db.insert(users).values({
+          email: email.toLowerCase(),
+          is_beta_approved: true,
+          global_role: 'user',
+          preferred_language: 'pt-BR',
+          notifications_enabled: true,
+        }).returning();
+        targetUser = newUser;
+      }
+      
+      // Add to master's franchise
+      const [masterFranchise] = await db.select().from(franchise_users).where(eq(franchise_users.user_id, currentUserId));
+      
+      const [newLink] = await db.insert(franchise_users).values({
+        franchise_id: masterFranchise.franchise_id,
+        user_id: targetUser.id,
+        role: role as any,
+        is_active: true,
+        invited_by: currentUserId,
+      }).returning();
+      
+      res.json({
+        ...newLink,
+        user_email: targetUser.email,
+      });
+    } catch (error) {
+      console.error("Error adding master user:", error);
+      res.status(500).json({ message: "Failed to add user" });
+    }
+  });
+
+  // PATCH /api/master/users/:userId - Update master franchise user
+  app.patch('/api/master/users/:userId', isAuthenticated, async (req: any, res) => {
+    try {
+      const currentUserId = req.user.claims.sub;
+      const targetUserId = req.params.userId;
+      const { role, is_active } = req.body;
+      
+      // Check if user is master franchise user
+      const [isMaster] = await db.select().from(franchise_users).where(and(
+        eq(franchise_users.user_id, currentUserId),
+        eq(franchise_users.role, 'master'),
+        eq(franchise_users.is_active, true)
+      ));
+      
+      if (!isMaster) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      const [existingLink] = await db.select().from(franchise_users).where(eq(franchise_users.user_id, targetUserId));
+      if (!existingLink) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      const updateData: any = { updated_at: new Date() };
+      if (role !== undefined) updateData.role = role;
+      if (is_active !== undefined) updateData.is_active = is_active;
+      
+      const [updated] = await db.update(franchise_users).set(updateData).where(eq(franchise_users.id, existingLink.id)).returning();
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating master user:", error);
+      res.status(500).json({ message: "Failed to update user" });
+    }
+  });
+
+  // DELETE /api/master/users/:userId - Remove master franchise user
+  app.delete('/api/master/users/:userId', isAuthenticated, async (req: any, res) => {
+    try {
+      const currentUserId = req.user.claims.sub;
+      const targetUserId = req.params.userId;
+      
+      // Check if user is master franchise user
+      const [isMaster] = await db.select().from(franchise_users).where(and(
+        eq(franchise_users.user_id, currentUserId),
+        eq(franchise_users.role, 'master'),
+        eq(franchise_users.is_active, true)
+      ));
+      
+      if (!isMaster) {
+        return res.status(403).json({ message: "Permission denied" });
+      }
+      
+      const [existingLink] = await db.select().from(franchise_users).where(eq(franchise_users.user_id, targetUserId));
+      if (!existingLink) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      await db.delete(franchise_users).where(eq(franchise_users.id, existingLink.id));
+      
+      res.json({ message: "User removed successfully" });
+    } catch (error) {
+      console.error("Error removing master user:", error);
       res.status(500).json({ message: "Failed to remove user" });
     }
   });
@@ -13605,6 +14030,7 @@ Provide your analysis as valid JSON.`;
 
   // ============================================================================
   // PERSONA AUTHENTICATION ROUTES - Separate login/register per persona
+  // PostgreSQL-backed persistent sessions (survives server restarts)
   // ============================================================================
 
   // POST /api/auth/persona/login - Login for specific persona type
@@ -13633,21 +14059,35 @@ Provide your analysis as valid JSON.`;
         return res.status(401).json({ message: errorMessages[result.error!] || result.error });
       }
       
-      // Set session
-      if (req.session) {
-        (req.session as any).personaAuth = {
-          credentialsId: result.credentials!.id,
-          personaType: result.credentials!.persona_type,
-          email: result.credentials!.email,
-          franchiseId: result.credentials!.franchise_id,
-          userId: result.credentials!.user_id,
-        };
-      }
+      // Create session token and store in PostgreSQL (persistent)
+      const sessionToken = crypto.randomBytes(32).toString('hex');
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+      
+      // Store session in PostgreSQL
+      await db.insert(persona_sessions).values({
+        session_token: sessionToken,
+        credentials_id: result.credentials!.id,
+        persona_type: result.credentials!.persona_type,
+        email: result.credentials!.email,
+        franchise_id: result.credentials!.franchise_id,
+        expires_at: expiresAt,
+        ip_address: req.ip || req.connection?.remoteAddress,
+        user_agent: req.headers['user-agent'],
+      });
+      
+      // Set session cookie
+      res.cookie('persona_session', sessionToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      });
       
       res.json({
         success: true,
         persona: result.credentials!.persona_type,
         franchiseId: result.credentials!.franchise_id,
+        sessionToken,
       });
     } catch (error) {
       console.error("Persona login error:", error);
@@ -13656,24 +14096,61 @@ Provide your analysis as valid JSON.`;
   });
 
   // POST /api/auth/persona/logout - Logout persona session
-  app.post('/api/auth/persona/logout', (req, res) => {
-    if (req.session) {
-      (req.session as any).personaAuth = null;
+  app.post('/api/auth/persona/logout', async (req, res) => {
+    try {
+      const sessionToken = req.cookies.persona_session;
+      if (sessionToken) {
+        // Delete session from PostgreSQL
+        await db.delete(persona_sessions).where(eq(persona_sessions.session_token, sessionToken));
+      }
+      res.clearCookie('persona_session');
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Persona logout error:", error);
+      res.clearCookie('persona_session');
+      res.json({ success: true });
     }
-    res.json({ success: true });
   });
 
   // GET /api/auth/persona/session - Check current persona session
-  app.get('/api/auth/persona/session', (req, res) => {
-    const personaAuth = (req.session as any)?.personaAuth;
-    if (personaAuth) {
+  app.get('/api/auth/persona/session', async (req, res) => {
+    try {
+      const sessionToken = req.cookies.persona_session;
+      
+      if (!sessionToken) {
+        return res.json({ authenticated: false });
+      }
+      
+      // Look up session in PostgreSQL
+      const [session] = await db.select()
+        .from(persona_sessions)
+        .where(eq(persona_sessions.session_token, sessionToken));
+      
+      if (!session) {
+        res.clearCookie('persona_session');
+        return res.json({ authenticated: false });
+      }
+      
+      // Check if session expired
+      if (new Date(session.expires_at) < new Date()) {
+        await db.delete(persona_sessions).where(eq(persona_sessions.session_token, sessionToken));
+        res.clearCookie('persona_session');
+        return res.json({ authenticated: false });
+      }
+      
+      // Update last accessed
+      await db.update(persona_sessions)
+        .set({ last_accessed_at: new Date() })
+        .where(eq(persona_sessions.session_token, sessionToken));
+      
       res.json({
         authenticated: true,
-        personaType: personaAuth.personaType,
-        email: personaAuth.email,
-        franchiseId: personaAuth.franchiseId,
+        personaType: session.persona_type,
+        email: session.email,
+        franchiseId: session.franchise_id,
       });
-    } else {
+    } catch (error) {
+      console.error("Session check error:", error);
       res.json({ authenticated: false });
     }
   });
@@ -14149,6 +14626,7 @@ Provide your analysis as valid JSON.`;
       res.status(500).json({ message: "Failed to approve" });
     }
   });
+
 
   const httpServer = createServer(app);
   return httpServer;
