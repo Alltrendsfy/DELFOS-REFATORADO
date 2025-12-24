@@ -2283,4 +2283,8 @@ export function registerFranchiseRoutes(router: Router) {
             res.status(500).json({ message: "Failed to fetch available profiles" });
         }
     });
+
+    // ========== MASTER FRANCHISE LEADS API ==========
+    const { registerMasterLeadsRoutes } = await import('./masterLeads');
+    registerMasterLeadsRoutes(router);
 }

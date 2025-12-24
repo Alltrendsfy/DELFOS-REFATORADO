@@ -31,7 +31,7 @@ export const users = pgTable("users", {
   beta_code_used: varchar("beta_code_used"), // The invite code used by this user
   // Global role: franchisor (platform owner), franchise_owner, franchisee, user
   global_role: varchar("global_role", { length: 20 }).default("user").notNull(),
-  
+
   // ========== GOVERNANCE FIELDS (Super Aggressive / Full Profiles) ==========
   // Performance Risk Score (0-100) - updated by system based on trading performance
   prs_score: decimal("prs_score", { precision: 5, scale: 2 }).default("50.00").notNull(),
@@ -42,7 +42,7 @@ export const users = pgTable("users", {
   // Legal acceptance for high-risk profiles
   high_risk_accepted_at: timestamp("high_risk_accepted_at"),
   high_risk_acceptance_version: varchar("high_risk_acceptance_version", { length: 20 }),
-  
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -453,7 +453,7 @@ export const risk_profile_config = pgTable("risk_profile_config", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   profile_code: varchar("profile_code", { length: 2 }).notNull().unique(), // C, M, A, SA, F
   profile_name: varchar("profile_name", { length: 50 }).notNull(), // Conservador, Moderado, Agressivo, Super Agressivo, Full
-  
+
   // ========== GOVERNANCE REQUIREMENTS (for SA and F profiles) ==========
   // Minimum plan required: starter, pro, enterprise, full
   min_plan_code: varchar("min_plan_code", { length: 20 }),
@@ -473,41 +473,41 @@ export const risk_profile_config = pgTable("risk_profile_config", {
   is_customizable: boolean("is_customizable").default(false).notNull(),
   // Baseline profile for customizable profiles (null or profile_code like "SA")
   baseline_profile_code: varchar("baseline_profile_code", { length: 2 }),
-  
+
   // ========== CLUSTER RESTRICTIONS ==========
   // Blocked clusters (cannot trade in these)
   blocked_clusters: integer("blocked_clusters").array(),
   // Priority clusters (prefer these for allocation)
   priority_clusters: integer("priority_clusters").array(),
-  
+
   // ========== LEVERAGE CONTROL ==========
   leverage_allowed: boolean("leverage_allowed").default(false).notNull(),
   max_leverage: decimal("max_leverage", { precision: 5, scale: 2 }).default("1.00").notNull(),
-  
+
   // ========== AUDIT FREQUENCY ==========
   min_audit_frequency_hours: integer("min_audit_frequency_hours").default(24).notNull(),
-  
+
   // Risk per trade
   risk_per_trade_pct: decimal("risk_per_trade_pct", { precision: 5, scale: 2 }).notNull(), // 0.20, 0.50, 1.00
   max_loss_per_pair_r: integer("max_loss_per_pair_r").notNull(), // 2R, 3R, 4R
-  
+
   // Daily limits
   max_daily_loss_pct: decimal("max_daily_loss_pct", { precision: 5, scale: 2 }).notNull(), // 2.0, 4.0, 7.0
   max_drawdown_30d_pct: decimal("max_drawdown_30d_pct", { precision: 5, scale: 2 }).notNull(), // 8.0, 12.0, 20.0
-  
+
   // Trailing drawdown
   use_trailing_dd: boolean("use_trailing_dd").default(true).notNull(),
   trailing_dd_pct_on_profit: decimal("trailing_dd_pct_on_profit", { precision: 5, scale: 2 }).notNull(), // 20.0, 25.0, 30.0
-  
+
   // Position limits
   max_open_positions: integer("max_open_positions").notNull(), // 5, 10, 20
   max_trades_per_day: integer("max_trades_per_day").notNull(), // 15, 30, 60
   cooldown_minutes_after_cb: integer("cooldown_minutes_after_cb").notNull(), // 60, 30, 15
-  
+
   // Position management
   allow_add_position: boolean("allow_add_position").default(false).notNull(),
   max_adds_per_trade: integer("max_adds_per_trade").default(0).notNull(), // 0, 1, 2
-  
+
   // Circuit breakers
   cb_pair_enabled: boolean("cb_pair_enabled").default(true).notNull(),
   cb_pair_loss_threshold_r: integer("cb_pair_loss_threshold_r").notNull(), // 2R, 3R, 4R
@@ -521,7 +521,7 @@ export const risk_profile_config = pgTable("risk_profile_config", {
   cb_es_threshold_pct: decimal("cb_es_threshold_pct", { precision: 5, scale: 2 }).default("20.00").notNull(), // Max ES 95% threshold
   lock_day_after_cb_daily: boolean("lock_day_after_cb_daily").default(true).notNull(),
   lock_campaign_after_cb_campaign: boolean("lock_campaign_after_cb_campaign").default(true).notNull(),
-  
+
   // ATR sizing
   use_atr_sizing: boolean("use_atr_sizing").default(true).notNull(),
   atr_lookback_period: integer("atr_lookback_period").default(14).notNull(),
@@ -529,22 +529,22 @@ export const risk_profile_config = pgTable("risk_profile_config", {
   min_atr_pct_tradable: decimal("min_atr_pct_tradable", { precision: 5, scale: 2 }).notNull(), // 0.5, 1.0, 2.0
   max_atr_pct_tradable: decimal("max_atr_pct_tradable", { precision: 5, scale: 2 }).notNull(), // 3.0, 5.0, 8.0
   max_position_pct_capital_per_pair: decimal("max_position_pct_capital_per_pair", { precision: 5, scale: 2 }).notNull(), // 5.0, 10.0, 15.0
-  
+
   // Selection filters (differentiated by profile)
   min_volume_24h_usd: decimal("min_volume_24h_usd", { precision: 20, scale: 2 }).notNull(), // 150M, 80M, 50M
   max_spread_pct: decimal("max_spread_pct", { precision: 5, scale: 4 }).notNull(), // 0.05, 0.08, 0.15
   min_depth_usd: decimal("min_depth_usd", { precision: 20, scale: 2 }).notNull(), // 1M, 500k, 300k
-  
+
   // Take Profit multipliers (ATR-based)
   tp_atr_multiplier: decimal("tp_atr_multiplier", { precision: 5, scale: 2 }).notNull(), // 1.5, 2.0, 3.0
   sl_atr_multiplier: decimal("sl_atr_multiplier", { precision: 5, scale: 2 }).default("1.0").notNull(),
-  
+
   // Max slippage allowed
   max_slippage_pct: decimal("max_slippage_pct", { precision: 5, scale: 4 }).notNull(), // 0.05, 0.10, 0.20
-  
+
   // Max risk per cluster
   max_cluster_risk_pct: decimal("max_cluster_risk_pct", { precision: 5, scale: 2 }).notNull(), // 6.0, 10.0, 15.0
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -565,7 +565,7 @@ export const campaigns = pgTable("campaigns", {
   selection_config: jsonb("selection_config"), // Asset selection criteria
   created_at: timestamp("created_at").defaultNow().notNull(),
   completed_at: timestamp("completed_at"),
-  
+
   // ========== GOVERNANCE FIELDS (Super Aggressive / Full) ==========
   // Double confirmation required for high-risk profiles
   double_confirmed: boolean("double_confirmed").default(false).notNull(),
@@ -578,7 +578,7 @@ export const campaigns = pgTable("campaigns", {
   custom_profile_id: varchar("custom_profile_id"),
   // Parameters locked after campaign start (for FULL profiles)
   parameters_locked_at: timestamp("parameters_locked_at"),
-  
+
   // ========== IMMUTABLE GOVERNANCE V2.0+ ==========
   // Immutable hash created at campaign creation - prevents tampering
   creation_hash: varchar("creation_hash", { length: 64 }), // SHA-256 of initial params
@@ -592,7 +592,7 @@ export const campaigns = pgTable("campaigns", {
   last_reconciled_at: timestamp("last_reconciled_at"),
   reconciliation_status: varchar("reconciliation_status", { length: 20 }), // ok, mismatch, pending
   reconciliation_hash: varchar("reconciliation_hash", { length: 64 }), // Hash of last reconciliation
-  
+
   // ========== ANTIFRAUDE FIELDS (Franchise System) ==========
   // Soft delete flag (campaigns cannot be hard deleted)
   is_deleted: boolean("is_deleted").default(false).notNull(),
@@ -600,7 +600,7 @@ export const campaigns = pgTable("campaigns", {
   deleted_reason: text("deleted_reason"),
   // Franchise link (optional - only for franchise users)
   franchise_id: varchar("franchise_id").references(() => franchises.id, { onDelete: 'set null' }),
-  
+
   // ========== RBM (Risk-Based Multiplier) FIELDS ==========
   // Multiplier requested by user (1.0 to 5.0)
   rbm_requested: decimal("rbm_requested", { precision: 3, scale: 1 }).default("1.0"),
@@ -629,24 +629,24 @@ export const campaigns = pgTable("campaigns", {
 export const rbm_events = pgTable("rbm_events", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
-  
+
   // Event type: REQUEST, APPROVE, DENY, REDUCE, RESTORE
   event_type: varchar("event_type", { length: 20 }).notNull(),
-  
+
   // Value changes
   previous_value: decimal("previous_value", { precision: 3, scale: 1 }), // RBM before event
   new_value: decimal("new_value", { precision: 3, scale: 1 }), // RBM after event
-  
+
   // Reason for the event
   reason: text("reason"),
-  
+
   // Quality Gate snapshot at time of event (for REQUEST/APPROVE/DENY)
   quality_gate_snapshot: jsonb("quality_gate_snapshot"), // { ok: boolean, reasons: string[], metrics: object }
-  
+
   // Audit fields
   triggered_by: varchar("triggered_by", { length: 20 }), // 'user', 'system', 'quality_gate', 'monitor'
   user_id: varchar("user_id"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_rbm_events_campaign").on(table.campaign_id),
@@ -753,24 +753,24 @@ export const symbol_rankings = pgTable("symbol_rankings", {
 export const asset_selection_filters = pgTable("asset_selection_filters", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
-  
+
   // Volume filters
   min_volume_24h_usd: decimal("min_volume_24h_usd", { precision: 20, scale: 2 }).default("5000000").notNull(), // $5M default
-  
+
   // Spread filters
   max_spread_mid_pct: decimal("max_spread_mid_pct", { precision: 10, scale: 6 }).default("0.10").notNull(), // 10% default
-  
+
   // Liquidity/Depth filters
   min_depth_top10_usd: decimal("min_depth_top10_usd", { precision: 20, scale: 2 }).default("100000").notNull(), // $100k default
-  
+
   // Volatility filters (ATR)
   min_atr_daily_pct: decimal("min_atr_daily_pct", { precision: 10, scale: 6 }).default("0.01").notNull(), // 1% min volatility
   max_atr_daily_pct: decimal("max_atr_daily_pct", { precision: 10, scale: 6 }).default("0.50").notNull(), // 50% max volatility
-  
+
   // Clustering config
   num_clusters: integer("num_clusters").default(5).notNull(), // K for K-means
   target_assets_count: integer("target_assets_count").default(30).notNull(), // Target ~30 tradable pairs
-  
+
   // Metadata
   is_default: boolean("is_default").default(true).notNull(),
   created_at: timestamp("created_at").defaultNow().notNull(),
@@ -845,30 +845,30 @@ export const trade_costs = pgTable("trade_costs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   trade_id: varchar("trade_id").notNull().references(() => trades.id, { onDelete: 'cascade' }),
   portfolio_id: varchar("portfolio_id").notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
-  
+
   // Entry costs
   entry_fee_usd: decimal("entry_fee_usd", { precision: 20, scale: 8 }).default("0").notNull(),
   entry_slippage_usd: decimal("entry_slippage_usd", { precision: 20, scale: 8 }).default("0").notNull(),
-  
+
   // Exit costs
   exit_fee_usd: decimal("exit_fee_usd", { precision: 20, scale: 8 }).default("0").notNull(),
   exit_slippage_usd: decimal("exit_slippage_usd", { precision: 20, scale: 8 }).default("0").notNull(),
-  
+
   // Total costs
   total_fees_usd: decimal("total_fees_usd", { precision: 20, scale: 8 }).default("0").notNull(),
   total_slippage_usd: decimal("total_slippage_usd", { precision: 20, scale: 8 }).default("0").notNull(),
   total_cost_usd: decimal("total_cost_usd", { precision: 20, scale: 8 }).default("0").notNull(), // Sum of all costs
-  
+
   // Tax calculation
   gross_pnl_usd: decimal("gross_pnl_usd", { precision: 20, scale: 8 }).default("0").notNull(), // Before costs
   net_pnl_usd: decimal("net_pnl_usd", { precision: 20, scale: 8 }).default("0").notNull(), // After costs, before tax
   tax_owed_usd: decimal("tax_owed_usd", { precision: 20, scale: 8 }).default("0").notNull(),
   net_after_tax_usd: decimal("net_after_tax_usd", { precision: 20, scale: 8 }).default("0").notNull(), // Final profit/loss
-  
+
   // Metadata
   tax_rate_applied_pct: decimal("tax_rate_applied_pct", { precision: 5, scale: 2 }), // Rate used for this trade
   tax_profile_id: varchar("tax_profile_id").references(() => tax_profiles.id),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_costs_trade").on(table.trade_id),
@@ -1141,34 +1141,34 @@ export const signals = pgTable("signals", {
   portfolio_id: varchar("portfolio_id").notNull().references(() => portfolios.id, { onDelete: 'cascade' }),
   symbol: text("symbol").notNull(),
   signal_type: text("signal_type").notNull(), // 'long' | 'short'
-  
+
   // Market state at signal generation
   price_at_signal: decimal("price_at_signal", { precision: 20, scale: 8 }).notNull(),
   ema12: decimal("ema12", { precision: 20, scale: 8 }).notNull(),
   ema36: decimal("ema36", { precision: 20, scale: 8 }).notNull(),
   atr: decimal("atr", { precision: 20, scale: 8 }).notNull(),
-  
+
   // CRITICAL: Immutable snapshot of config used (for audit/telemetry)
   signal_config_id: varchar("signal_config_id").notNull().references(() => signal_configs.id, { onDelete: 'cascade' }),
   config_snapshot: jsonb("config_snapshot").notNull(), // Full config at generation time
-  
+
   // Calculated targets (based on config snapshot)
   calculated_tp1: decimal("calculated_tp1", { precision: 20, scale: 8 }).notNull(),
   calculated_tp2: decimal("calculated_tp2", { precision: 20, scale: 8 }).notNull(),
   calculated_sl: decimal("calculated_sl", { precision: 20, scale: 8 }).notNull(),
   calculated_position_size: decimal("calculated_position_size", { precision: 20, scale: 8 }).notNull(),
-  
+
   // Risk/Circuit Breaker context (for telemetry)
   risk_per_trade_bps_used: integer("risk_per_trade_bps_used").notNull(),
   circuit_breaker_state: jsonb("circuit_breaker_state"), // Snapshot of breaker states at signal time
-  
+
   // Lifecycle tracking
   status: text("status").default("pending").notNull(), // pending, executed, expired, cancelled
   position_id: varchar("position_id").references(() => positions.id, { onDelete: 'set null' }),
   execution_price: decimal("execution_price", { precision: 20, scale: 8 }),
   execution_reason: text("execution_reason"),
   expiration_reason: text("expiration_reason"),
-  
+
   // Timestamps
   generated_at: timestamp("generated_at").defaultNow().notNull(),
   executed_at: timestamp("executed_at"),
@@ -1252,27 +1252,27 @@ export const backtest_runs = pgTable("backtest_runs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
   portfolio_id: varchar("portfolio_id").references(() => portfolios.id, { onDelete: 'set null' }),
-  
+
   // Configuration
   name: text("name").notNull(),
   start_date: timestamp("start_date").notNull(),
   end_date: timestamp("end_date").notNull(),
   initial_capital: decimal("initial_capital", { precision: 20, scale: 2 }).notNull(),
   symbols: text("symbols").array().notNull(), // Array of symbols to backtest
-  
+
   // Strategy parameters (JSON for flexibility) - optional, defaults provided by backend
   strategy_params: jsonb("strategy_params"), // ema_fast, ema_slow, atr_period, tp/sl multipliers
   risk_params: jsonb("risk_params"), // risk_per_trade_bps, cluster_cap_pct, breaker thresholds
   cost_params: jsonb("cost_params"), // fee_roundtrip_pct, slippage_pct, tax_rate
-  
+
   // Execution status
   status: text("status").default("pending").notNull(), // pending, running, completed, failed
   progress_percentage: decimal("progress_percentage", { precision: 5, scale: 2 }).default("0").notNull(),
   error_message: text("error_message"),
-  
+
   // Whether to apply circuit breakers (for A/B comparison)
   apply_breakers: boolean("apply_breakers").default(true).notNull(),
-  
+
   // Summary metrics (computed after completion)
   total_trades: integer("total_trades").default(0).notNull(),
   winning_trades: integer("winning_trades").default(0).notNull(),
@@ -1282,7 +1282,7 @@ export const backtest_runs = pgTable("backtest_runs", {
   total_pnl_percentage: decimal("total_pnl_percentage", { precision: 10, scale: 4 }),
   total_fees: decimal("total_fees", { precision: 20, scale: 8 }),
   total_slippage: decimal("total_slippage", { precision: 20, scale: 8 }),
-  
+
   started_at: timestamp("started_at"),
   completed_at: timestamp("completed_at"),
   created_at: timestamp("created_at").defaultNow().notNull(),
@@ -1297,46 +1297,46 @@ export const backtest_runs = pgTable("backtest_runs", {
 export const backtest_trades = pgTable("backtest_trades", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   backtest_run_id: varchar("backtest_run_id").notNull().references(() => backtest_runs.id, { onDelete: 'cascade' }),
-  
+
   symbol: text("symbol").notNull(),
   cluster_number: integer("cluster_number"),
   side: text("side").notNull(), // long or short
-  
+
   // Entry details
   entry_price: decimal("entry_price", { precision: 20, scale: 8 }).notNull(),
   entry_time: timestamp("entry_time").notNull(),
   entry_signal_strength: decimal("entry_signal_strength", { precision: 10, scale: 4 }),
-  
+
   // Exit details
   exit_price: decimal("exit_price", { precision: 20, scale: 8 }),
   exit_time: timestamp("exit_time"),
   exit_reason: text("exit_reason"), // tp1, tp2, sl, trailing_sl, breaker, end_of_period
-  
+
   // Position sizing
   quantity: decimal("quantity", { precision: 20, scale: 8 }).notNull(),
   notional_value: decimal("notional_value", { precision: 20, scale: 2 }).notNull(),
-  
+
   // PnL and costs
   gross_pnl: decimal("gross_pnl", { precision: 20, scale: 2 }),
   fees: decimal("fees", { precision: 20, scale: 8 }),
   slippage: decimal("slippage", { precision: 20, scale: 8 }),
   net_pnl: decimal("net_pnl", { precision: 20, scale: 2 }),
   net_pnl_percentage: decimal("net_pnl_percentage", { precision: 10, scale: 4 }),
-  
+
   // ATR/EMA context at entry
   atr_at_entry: decimal("atr_at_entry", { precision: 20, scale: 8 }),
   ema_fast_at_entry: decimal("ema_fast_at_entry", { precision: 20, scale: 8 }),
   ema_slow_at_entry: decimal("ema_slow_at_entry", { precision: 20, scale: 8 }),
-  
+
   // OCO levels
   stop_loss: decimal("stop_loss", { precision: 20, scale: 8 }),
   take_profit_1: decimal("take_profit_1", { precision: 20, scale: 8 }),
   take_profit_2: decimal("take_profit_2", { precision: 20, scale: 8 }),
-  
+
   // Breaker interactions
   breaker_triggered: boolean("breaker_triggered").default(false).notNull(),
   breaker_type: text("breaker_type"), // asset, cluster, global
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_backtest_trades_run").on(table.backtest_run_id),
@@ -1349,13 +1349,13 @@ export const backtest_trades = pgTable("backtest_trades", {
 export const backtest_metrics = pgTable("backtest_metrics", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   backtest_run_id: varchar("backtest_run_id").notNull().references(() => backtest_runs.id, { onDelete: 'cascade' }).unique(),
-  
+
   // Return metrics
   mean_return: decimal("mean_return", { precision: 20, scale: 8 }),
   stdev_return: decimal("stdev_return", { precision: 20, scale: 8 }),
   sharpe_ratio: decimal("sharpe_ratio", { precision: 10, scale: 4 }),
   sortino_ratio: decimal("sortino_ratio", { precision: 10, scale: 4 }),
-  
+
   // Risk metrics
   var_95: decimal("var_95", { precision: 20, scale: 8 }),
   var_99: decimal("var_99", { precision: 20, scale: 8 }),
@@ -1364,7 +1364,7 @@ export const backtest_metrics = pgTable("backtest_metrics", {
   max_drawdown: decimal("max_drawdown", { precision: 20, scale: 2 }),
   max_drawdown_percentage: decimal("max_drawdown_percentage", { precision: 10, scale: 4 }),
   max_drawdown_duration_hours: integer("max_drawdown_duration_hours"),
-  
+
   // Trade metrics
   hit_rate: decimal("hit_rate", { precision: 10, scale: 4 }),
   avg_win: decimal("avg_win", { precision: 20, scale: 2 }),
@@ -1372,29 +1372,29 @@ export const backtest_metrics = pgTable("backtest_metrics", {
   profit_factor: decimal("profit_factor", { precision: 10, scale: 4 }),
   payoff_ratio: decimal("payoff_ratio", { precision: 10, scale: 4 }),
   expectancy: decimal("expectancy", { precision: 20, scale: 2 }),
-  
+
   // Turnover and costs
   turnover: decimal("turnover", { precision: 20, scale: 2 }),
   fees_percentage: decimal("fees_percentage", { precision: 10, scale: 4 }),
   slippage_bp: decimal("slippage_bp", { precision: 10, scale: 2 }),
   cost_drag_percentage: decimal("cost_drag_percentage", { precision: 10, scale: 4 }),
-  
+
   // Breaker statistics
   asset_breakers_triggered: integer("asset_breakers_triggered").default(0).notNull(),
   cluster_breakers_triggered: integer("cluster_breakers_triggered").default(0).notNull(),
   global_breakers_triggered: integer("global_breakers_triggered").default(0).notNull(),
   trades_blocked_by_breakers: integer("trades_blocked_by_breakers").default(0).notNull(),
-  
+
   // Monte Carlo simulation results (JSON for flexibility)
   monte_carlo_results: jsonb("monte_carlo_results"), // scenarios, confidence intervals
-  
+
   // Validation criteria
   es95_improved: boolean("es95_improved"), // ES95 better with breakers vs without
   var99_improved: boolean("var99_improved"), // VaR99 reduced in stress with breakers
   pnl_net_positive: boolean("pnl_net_positive"), // PnL líquido positivo
   validation_passed: boolean("validation_passed").default(false).notNull(),
   validation_notes: text("validation_notes"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -1408,47 +1408,47 @@ export const backtest_metrics = pgTable("backtest_metrics", {
 export const campaign_risk_states = pgTable("campaign_risk_states", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }).unique(),
-  
+
   // Equity tracking
   current_equity: decimal("current_equity", { precision: 20, scale: 2 }).notNull(),
   equity_high_watermark: decimal("equity_high_watermark", { precision: 20, scale: 2 }).notNull(),
-  
+
   // Daily PnL tracking (resets at 00:00 UTC)
   daily_pnl: decimal("daily_pnl", { precision: 20, scale: 2 }).default("0").notNull(),
   daily_pnl_pct: decimal("daily_pnl_pct", { precision: 10, scale: 4 }).default("0").notNull(),
   daily_loss_pct: decimal("daily_loss_pct", { precision: 10, scale: 4 }).default("0").notNull(),
-  
+
   // Drawdown tracking
   current_dd_pct: decimal("current_dd_pct", { precision: 10, scale: 4 }).default("0").notNull(),
   max_dd_pct: decimal("max_dd_pct", { precision: 10, scale: 4 }).default("0").notNull(),
-  
+
   // R-based loss tracking per pair (JSON map: symbol -> loss in R units)
   loss_in_r_by_pair: jsonb("loss_in_r_by_pair").default({}).notNull(),
-  
+
   // Daily counters
   trades_today: integer("trades_today").default(0).notNull(),
   positions_open: integer("positions_open").default(0).notNull(),
-  
+
   // Circuit breaker states
   cb_pair_triggered: jsonb("cb_pair_triggered").default({}).notNull(), // symbol -> boolean
   cb_daily_triggered: boolean("cb_daily_triggered").default(false).notNull(),
   cb_campaign_triggered: boolean("cb_campaign_triggered").default(false).notNull(),
   cb_var_es_triggered: boolean("cb_var_es_triggered").default(false).notNull(), // VaR/ES based CB (V2.0+)
   cb_cooldown_until: timestamp("cb_cooldown_until"),
-  
+
   // VaR/ES tracking for circuit breaker (V2.0+ Governance)
   current_var_95: decimal("current_var_95", { precision: 10, scale: 4 }), // Latest calculated VaR 95%
   current_es_95: decimal("current_es_95", { precision: 10, scale: 4 }), // Latest calculated ES 95%
   var_es_last_calculated: timestamp("var_es_last_calculated"), // When VaR/ES was last calculated
-  
+
   // Current tradable set (symbols in the operatable subset)
   current_tradable_set: text("current_tradable_set").array().default([]).notNull(),
-  
+
   // Scheduler timestamps
   last_rebalance_ts: timestamp("last_rebalance_ts"),
   last_audit_ts: timestamp("last_audit_ts"),
   last_daily_reset_ts: timestamp("last_daily_reset_ts"),
-  
+
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_campaign_risk_campaign").on(table.campaign_id),
@@ -1461,24 +1461,24 @@ export const campaign_asset_universes = pgTable("campaign_asset_universes", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
   symbol: text("symbol").notNull(),
-  
+
   // Weight and ranking
   initial_weight: decimal("initial_weight", { precision: 10, scale: 6 }),
   current_weight: decimal("current_weight", { precision: 10, scale: 6 }),
-  
+
   // Status tracking
   is_active: boolean("is_active").default(true).notNull(),
   is_in_tradable_set: boolean("is_in_tradable_set").default(false).notNull(),
-  
+
   // Scoring data (from last rebalance)
   last_score: decimal("last_score", { precision: 10, scale: 4 }),
   last_rank: integer("last_rank"),
   cluster_number: integer("cluster_number"),
-  
+
   // Problem tracking
   is_problematic: boolean("is_problematic").default(false).notNull(),
   problem_reason: text("problem_reason"),
-  
+
   // Timestamps
   last_rebalance_at: timestamp("last_rebalance_at"),
   created_at: timestamp("created_at").defaultNow().notNull(),
@@ -1496,47 +1496,47 @@ export const campaign_daily_reports = pgTable("campaign_daily_reports", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
   report_date: timestamp("report_date").notNull(),
-  
+
   // Trade performance metrics
   trades_count: integer("trades_count").default(0).notNull(),
   winning_trades: integer("winning_trades").default(0).notNull(),
   losing_trades: integer("losing_trades").default(0).notNull(),
   hit_rate: decimal("hit_rate", { precision: 10, scale: 4 }),
-  
+
   // Payoff and expectancy
   avg_win: decimal("avg_win", { precision: 20, scale: 2 }),
   avg_loss: decimal("avg_loss", { precision: 20, scale: 2 }),
   payoff_ratio: decimal("payoff_ratio", { precision: 10, scale: 4 }),
   expectancy: decimal("expectancy", { precision: 20, scale: 2 }),
-  
+
   // PnL
   pnl_day: decimal("pnl_day", { precision: 20, scale: 2 }).default("0").notNull(),
   pnl_cumulative: decimal("pnl_cumulative", { precision: 20, scale: 2 }).default("0").notNull(),
   pnl_day_pct: decimal("pnl_day_pct", { precision: 10, scale: 4 }),
-  
+
   // Risk metrics
   dd_current: decimal("dd_current", { precision: 10, scale: 4 }),
   dd_max: decimal("dd_max", { precision: 10, scale: 4 }),
   var_95: decimal("var_95", { precision: 20, scale: 2 }),
   es_95: decimal("es_95", { precision: 20, scale: 2 }),
-  
+
   // Costs
   avg_slippage: decimal("avg_slippage", { precision: 10, scale: 6 }),
   fees_total: decimal("fees_total", { precision: 20, scale: 8 }).default("0").notNull(),
   funding_total: decimal("funding_total", { precision: 20, scale: 8 }).default("0").notNull(),
-  
+
   // Circuit breaker activity
   cb_pair_triggers: integer("cb_pair_triggers").default(0).notNull(),
   cb_daily_trigger: boolean("cb_daily_trigger").default(false).notNull(),
   cb_campaign_trigger: boolean("cb_campaign_trigger").default(false).notNull(),
-  
+
   // Problematic assets
   problematic_assets: text("problematic_assets").array().default([]).notNull(),
-  
+
   // Notes and alerts
   notes: text("notes"),
   risk_alerts: jsonb("risk_alerts").default([]).notNull(),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_campaign_report_campaign").on(table.campaign_id),
@@ -1550,34 +1550,34 @@ export const campaign_orders = pgTable("campaign_orders", {
   campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
   internal_order_id: varchar("internal_order_id").notNull(),
   exchange_order_id: text("exchange_order_id"),
-  
+
   symbol: text("symbol").notNull(),
   side: text("side").notNull(), // buy, sell
   order_type: text("order_type").notNull(), // market, limit, stop_loss, take_profit, oco
-  
+
   // Order details
   quantity: decimal("quantity", { precision: 20, scale: 8 }).notNull(),
   price: decimal("price", { precision: 20, scale: 8 }),
   stop_price: decimal("stop_price", { precision: 20, scale: 8 }),
   limit_price: decimal("limit_price", { precision: 20, scale: 8 }),
-  
+
   // OCO linking
   oco_group_id: varchar("oco_group_id"),
   is_sl_order: boolean("is_sl_order").default(false).notNull(),
   is_tp_order: boolean("is_tp_order").default(false).notNull(),
-  
+
   // Status tracking
   status: text("status").notNull(), // pending, open, filled, partially_filled, cancelled, expired, rejected
   filled_quantity: decimal("filled_quantity", { precision: 20, scale: 8 }).default("0").notNull(),
   average_fill_price: decimal("average_fill_price", { precision: 20, scale: 8 }),
-  
+
   // Fees and costs
   fees: decimal("fees", { precision: 20, scale: 8 }).default("0").notNull(),
   slippage: decimal("slippage", { precision: 20, scale: 8 }).default("0").notNull(),
-  
+
   // Reason for cancellation/rejection
   cancel_reason: text("cancel_reason"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
   filled_at: timestamp("filled_at"),
@@ -1593,42 +1593,42 @@ export const campaign_orders = pgTable("campaign_orders", {
 export const campaign_positions = pgTable("campaign_positions", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
-  
+
   symbol: text("symbol").notNull(),
   side: text("side").notNull(), // long, short
-  
+
   // Position sizing
   quantity: decimal("quantity", { precision: 20, scale: 8 }).notNull(),
   entry_price: decimal("entry_price", { precision: 20, scale: 8 }).notNull(),
   current_price: decimal("current_price", { precision: 20, scale: 8 }).notNull(),
-  
+
   // OCO levels (mandatory)
   stop_loss: decimal("stop_loss", { precision: 20, scale: 8 }).notNull(),
   take_profit: decimal("take_profit", { precision: 20, scale: 8 }).notNull(),
-  
+
   // ATR context at entry (for R calculation)
   atr_at_entry: decimal("atr_at_entry", { precision: 20, scale: 8 }),
   risk_amount: decimal("risk_amount", { precision: 20, scale: 2 }), // Entry - SL in USD (1R)
-  
+
   // Position adds tracking
   adds_count: integer("adds_count").default(0).notNull(),
   avg_entry_price: decimal("avg_entry_price", { precision: 20, scale: 8 }),
-  
+
   // PnL tracking
   unrealized_pnl: decimal("unrealized_pnl", { precision: 20, scale: 2 }).default("0").notNull(),
   unrealized_pnl_pct: decimal("unrealized_pnl_pct", { precision: 10, scale: 4 }).default("0").notNull(),
   realized_pnl: decimal("realized_pnl", { precision: 20, scale: 2 }).default("0").notNull(),
-  
+
   // Slippage tracking (for audit metrics)
   estimated_entry_price: decimal("estimated_entry_price", { precision: 20, scale: 8 }), // Price at signal generation
   actual_fill_price: decimal("actual_fill_price", { precision: 20, scale: 8 }), // Actual execution price
   entry_slippage_bps: decimal("entry_slippage_bps", { precision: 10, scale: 4 }).default("0"), // Basis points slippage
   exit_slippage_bps: decimal("exit_slippage_bps", { precision: 10, scale: 4 }).default("0"), // Basis points slippage on exit
-  
+
   // Lifecycle
   state: text("state").notNull(), // open, closing, closed
   close_reason: text("close_reason"), // sl_hit, tp_hit, signal_exit, rebalance_exit, breaker_exit, manual
-  
+
   opened_at: timestamp("opened_at").defaultNow().notNull(),
   closed_at: timestamp("closed_at"),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
@@ -1643,14 +1643,14 @@ export const campaign_positions = pgTable("campaign_positions", {
 export const monte_carlo_scenarios = pgTable("monte_carlo_scenarios", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   backtest_run_id: varchar("backtest_run_id").notNull().references(() => backtest_runs.id, { onDelete: 'cascade' }),
-  
+
   scenario_number: integer("scenario_number").notNull(),
   scenario_type: text("scenario_type").notNull(), // normal, stress_intra_corr, stress_inter_corr, black_swan
-  
+
   // Correlation parameters used
   intra_cluster_correlation: decimal("intra_cluster_correlation", { precision: 5, scale: 4 }),
   inter_cluster_correlation: decimal("inter_cluster_correlation", { precision: 5, scale: 4 }),
-  
+
   // Results
   final_equity: decimal("final_equity", { precision: 20, scale: 2 }),
   total_pnl: decimal("total_pnl", { precision: 20, scale: 2 }),
@@ -1658,7 +1658,7 @@ export const monte_carlo_scenarios = pgTable("monte_carlo_scenarios", {
   var_95: decimal("var_95", { precision: 20, scale: 8 }),
   es_95: decimal("es_95", { precision: 20, scale: 8 }),
   breakers_activated: integer("breakers_activated").default(0).notNull(),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_monte_carlo_run").on(table.backtest_run_id),
@@ -1758,38 +1758,38 @@ export type CampaignPosition = typeof campaign_positions.$inferSelect;
 // Campaign Audit Ledger - append-only immutable log with hash chain for governance
 export const campaign_audit_ledger = pgTable("campaign_audit_ledger", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Campaign reference
   campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
-  
+
   // Sequence number (monotonically increasing per campaign)
   sequence_number: integer("sequence_number").notNull(),
-  
+
   // Event type: campaign_created, campaign_locked, campaign_started, campaign_paused, 
   // campaign_stopped, campaign_completed, position_opened, position_closed, 
   // circuit_breaker_triggered, reconciliation_completed, rebalance_executed, 
   // audit_24h_completed, parameter_change_blocked, integrity_violation
   event_type: varchar("event_type", { length: 50 }).notNull(),
-  
+
   // Event severity: info, warning, critical, audit
   severity: varchar("severity", { length: 20 }).default("info").notNull(),
-  
+
   // Immutable event data snapshot
   event_data: jsonb("event_data").notNull(),
-  
+
   // Hash chain for integrity verification
   previous_hash: varchar("previous_hash", { length: 64 }), // SHA-256 of previous entry (null for first)
   entry_hash: varchar("entry_hash", { length: 64 }).notNull(), // SHA-256 of this entry
-  
+
   // Digital signature (critical events)
   signature: text("signature"),
   signature_algorithm: varchar("signature_algorithm", { length: 20 }), // HMAC-SHA256, ED25519
   signed_by: varchar("signed_by", { length: 50 }), // system, admin_id, service_name
-  
+
   // Actor context
   actor_type: varchar("actor_type", { length: 20 }).notNull(), // system, user, admin, robot
   actor_id: varchar("actor_id"), // user_id or service name
-  
+
   // Immutable timestamp
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
@@ -1811,35 +1811,35 @@ export type CampaignAuditLedger = typeof campaign_audit_ledger.$inferSelect;
 // Exchange Reconciliation Records - tracks DELFOS vs Exchange position reconciliation
 export const exchange_reconciliations = pgTable("exchange_reconciliations", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Campaign reference
   campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
-  
+
   // Reconciliation type: positions, orders, balances, full
   reconciliation_type: varchar("reconciliation_type", { length: 20 }).notNull(),
-  
+
   // Status: pending, in_progress, completed, failed, mismatch_detected
   status: varchar("status", { length: 30 }).notNull(),
-  
+
   // Snapshot of DELFOS state at reconciliation time
   delfos_snapshot: jsonb("delfos_snapshot").notNull(),
-  
+
   // Snapshot of Exchange state at reconciliation time
   exchange_snapshot: jsonb("exchange_snapshot").notNull(),
-  
+
   // Discrepancies found (if any)
   discrepancies: jsonb("discrepancies"),
   discrepancy_count: integer("discrepancy_count").default(0).notNull(),
-  
+
   // Resolution
   resolution_status: varchar("resolution_status", { length: 20 }), // null, auto_resolved, manual_required, resolved
   resolution_notes: text("resolution_notes"),
   resolved_at: timestamp("resolved_at"),
   resolved_by: varchar("resolved_by"),
-  
+
   // Integrity hash
   reconciliation_hash: varchar("reconciliation_hash", { length: 64 }).notNull(),
-  
+
   // Timestamps
   started_at: timestamp("started_at").defaultNow().notNull(),
   completed_at: timestamp("completed_at"),
@@ -1865,20 +1865,20 @@ export type ExchangeReconciliation = typeof exchange_reconciliations.$inferSelec
 export const robot_activity_logs = pgTable("robot_activity_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
-  
+
   // Event classification
   event_type: text("event_type").notNull(), // signal_analysis, position_open, position_close, circuit_breaker, rebalance, error, info
   severity: text("severity").notNull().default("info"), // info, warning, success, error
-  
+
   // Symbol context (optional, for trading events)
   symbol: text("symbol"),
-  
+
   // Human-readable message (translation key or direct text)
   message_key: text("message_key").notNull(), // Translation key for i18n
-  
+
   // Technical details (for detailed view)
   details: jsonb("details"), // { atr, ema12, ema36, signal, slAtr, tpAtr, price, side, quantity, pnl, etc. }
-  
+
   // Timestamps
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
@@ -1900,30 +1900,30 @@ export type RobotActivityLog = typeof robot_activity_logs.$inferSelect;
 // Admin Alerts - stores notifications for admin about user activity
 export const admin_alerts = pgTable("admin_alerts", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // User who triggered the alert
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
-  
+
   // Alert type: user_login, campaign_created_paper, campaign_created_real
   alert_type: text("alert_type").notNull(),
-  
+
   // Alert severity: info, warning, important
   severity: text("severity").notNull().default("info"),
-  
+
   // Related entity (optional)
   campaign_id: varchar("campaign_id").references(() => campaigns.id, { onDelete: 'set null' }),
   portfolio_id: varchar("portfolio_id").references(() => portfolios.id, { onDelete: 'set null' }),
-  
+
   // Alert details
   title: text("title").notNull(),
   message: text("message").notNull(),
   details: jsonb("details"), // Additional context data
-  
+
   // Read status
   is_read: boolean("is_read").default(false).notNull(),
   read_at: timestamp("read_at"),
   read_by: varchar("read_by").references(() => users.id),
-  
+
   // Timestamps
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
@@ -1946,7 +1946,7 @@ export type AdminAlert = typeof admin_alerts.$inferSelect;
 // Franchisor Settings - Legal entity configuration for the franchise network owner
 export const franchisor_settings = pgTable("franchisor_settings", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Legal Entity Information
   legal_name: varchar("legal_name", { length: 300 }).notNull(), // Razão Social
   trade_name: varchar("trade_name", { length: 200 }).notNull(), // Nome Fantasia
@@ -1954,7 +1954,7 @@ export const franchisor_settings = pgTable("franchisor_settings", {
   tax_id_type: varchar("tax_id_type", { length: 10 }).default("cnpj").notNull(), // cnpj, ein, vat, etc.
   state_registration: varchar("state_registration", { length: 50 }), // Inscrição Estadual
   municipal_registration: varchar("municipal_registration", { length: 50 }), // Inscrição Municipal
-  
+
   // Address (Headquarters)
   address_street: varchar("address_street", { length: 300 }),
   address_number: varchar("address_number", { length: 20 }),
@@ -1964,7 +1964,7 @@ export const franchisor_settings = pgTable("franchisor_settings", {
   address_state: varchar("address_state", { length: 50 }),
   address_zip: varchar("address_zip", { length: 20 }),
   address_country: varchar("address_country", { length: 3 }).default("BRA").notNull(), // ISO 3166-1 alpha-3
-  
+
   // Banking Information (for receiving royalties)
   bank_name: varchar("bank_name", { length: 100 }),
   bank_code: varchar("bank_code", { length: 10 }),
@@ -1974,12 +1974,12 @@ export const franchisor_settings = pgTable("franchisor_settings", {
   bank_pix_key: varchar("bank_pix_key", { length: 100 }),
   bank_swift: varchar("bank_swift", { length: 20 }), // For international
   bank_iban: varchar("bank_iban", { length: 50 }), // For international
-  
+
   // Fiscal Configuration
   tax_regime: varchar("tax_regime", { length: 50 }), // simples_nacional, lucro_presumido, lucro_real
   nfse_enabled: boolean("nfse_enabled").default(false),
   invoice_series: varchar("invoice_series", { length: 10 }),
-  
+
   // Contact Information
   contact_email: varchar("contact_email", { length: 200 }),
   contact_phone: varchar("contact_phone", { length: 30 }),
@@ -1987,17 +1987,17 @@ export const franchisor_settings = pgTable("franchisor_settings", {
   support_email: varchar("support_email", { length: 200 }),
   commercial_email: varchar("commercial_email", { length: 200 }),
   website: varchar("website", { length: 200 }),
-  
+
   // Social Media
   social_linkedin: varchar("social_linkedin", { length: 200 }),
   social_instagram: varchar("social_instagram", { length: 200 }),
   social_twitter: varchar("social_twitter", { length: 200 }),
-  
+
   // Branding
   logo_url: text("logo_url"),
   primary_color: varchar("primary_color", { length: 10 }),
   secondary_color: varchar("secondary_color", { length: 10 }),
-  
+
   // Metadata
   is_configured: boolean("is_configured").default(false).notNull(),
   created_at: timestamp("created_at").defaultNow().notNull(),
@@ -2018,25 +2018,25 @@ export type FranchisorSettings = typeof franchisor_settings.$inferSelect;
 // Contract Templates - Models for franchise agreements and legal documents
 export const contract_templates = pgTable("contract_templates", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Template identification
   name: varchar("name", { length: 200 }).notNull(),
   code: varchar("code", { length: 50 }).notNull().unique(), // franchise_agreement, master_agreement, terms_of_use, privacy_policy
   type: varchar("type", { length: 50 }).notNull(), // franchise, master_franchise, terms, privacy, other
-  
+
   // Content
   content: text("content").notNull(), // HTML or Markdown content
   version: varchar("version", { length: 20 }).notNull().default("1.0"),
-  
+
   // Requirements
   requires_acceptance: boolean("requires_acceptance").default(true).notNull(),
   is_mandatory: boolean("is_mandatory").default(true).notNull(),
   applies_to: varchar("applies_to", { length: 50 }).notNull(), // franchise, master_franchise, all
-  
+
   // Status
   is_active: boolean("is_active").default(true).notNull(),
   published_at: timestamp("published_at"),
-  
+
   // Metadata
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
@@ -2059,21 +2059,21 @@ export type ContractTemplate = typeof contract_templates.$inferSelect;
 // Contract Acceptances - Records of user acceptances of contracts
 export const contract_acceptances = pgTable("contract_acceptances", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Who accepted
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
   franchise_id: varchar("franchise_id").references(() => franchises.id, { onDelete: 'set null' }),
-  
+
   // What was accepted
   template_id: varchar("template_id").notNull().references(() => contract_templates.id),
   template_version: varchar("template_version", { length: 20 }).notNull(), // Version at time of acceptance
   template_code: varchar("template_code", { length: 50 }).notNull(), // For quick lookups
-  
+
   // Acceptance details
   accepted_at: timestamp("accepted_at").defaultNow().notNull(),
   ip_address: varchar("ip_address", { length: 50 }),
   user_agent: text("user_agent"),
-  
+
   // Confirmation
   checkbox_text: text("checkbox_text"), // The exact text user agreed to
   is_valid: boolean("is_valid").default(true).notNull(),
@@ -2101,33 +2101,33 @@ export const franchise_plans = pgTable("franchise_plans", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   name: varchar("name", { length: 50 }).notNull().unique(), // Starter, Professional, Enterprise
   code: varchar("code", { length: 20 }).notNull().unique(), // starter, pro, enterprise
-  
+
   // Plan limits
   max_campaigns: integer("max_campaigns").default(3).notNull(), // Max simultaneous campaigns
   max_capital_usd: decimal("max_capital_usd", { precision: 20, scale: 2 }), // Max capital under management (null = unlimited)
-  
+
   // Royalty configuration
   royalty_percentage: decimal("royalty_percentage", { precision: 5, scale: 2 }).default("10").notNull(), // % of net profit
-  
+
   // Franchise fee (one-time payment to join)
   franchise_fee_usd: decimal("franchise_fee_usd", { precision: 12, scale: 2 }).default("0").notNull(), // One-time entry fee
-  
+
   // Risk limits by plan (controls what franqueado can configure)
   max_drawdown_pct: decimal("max_drawdown_pct", { precision: 5, scale: 2 }).default("15").notNull(), // Max allowed drawdown %
   max_position_size_pct: decimal("max_position_size_pct", { precision: 5, scale: 2 }).default("10").notNull(), // Max position size %
   max_daily_trades: integer("max_daily_trades").default(50).notNull(), // Max trades per day
-  
+
   // RBM (Risk-Based Multiplier) limit by plan
   // Starter=2.0, Professional=3.0, Enterprise=4.0, Full=5.0
   max_rbm_multiplier: decimal("max_rbm_multiplier", { precision: 3, scale: 1 }).default("2.0").notNull(), // Max risk multiplier allowed
-  
+
   // Features
   features: jsonb("features"), // { support: true, exclusive_signals: true, premium_audit: true }
-  
+
   // Status
   is_active: boolean("is_active").default(true).notNull(),
   display_order: integer("display_order").default(0).notNull(),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -2143,7 +2143,7 @@ export type FranchisePlan = typeof franchise_plans.$inferSelect;
 // Franchises - stores franchise units (business entities)
 export const franchises = pgTable("franchises", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Business info
   name: varchar("name", { length: 200 }).notNull(), // Franchise unit name
   cnpj: varchar("cnpj", { length: 18 }).unique(), // Brazilian business ID (optional for international)
@@ -2151,75 +2151,75 @@ export const franchises = pgTable("franchises", {
   tax_id_type: varchar("tax_id_type", { length: 10 }), // 'cpf' | 'cnpj' | null - type of cnpj field
   address: text("address"),
   country: varchar("country", { length: 3 }).default("BRA").notNull(), // ISO 3166-1 alpha-3
-  
+
   // Contract info
   plan_id: varchar("plan_id").notNull().references(() => franchise_plans.id),
   contract_start: timestamp("contract_start").notNull(),
   contract_end: timestamp("contract_end"), // Null = auto-renewing
   contract_pdf_url: text("contract_pdf_url"), // Uploaded contract document
-  
+
   // Custom royalty (overrides plan default if set)
   custom_royalty_percentage: decimal("custom_royalty_percentage", { precision: 5, scale: 2 }),
-  
+
   // Banking for royalty payments
   bank_name: varchar("bank_name", { length: 100 }),
   bank_account: varchar("bank_account", { length: 50 }),
   bank_agency: varchar("bank_agency", { length: 20 }),
   pix_key: varchar("pix_key", { length: 100 }),
-  
+
   // Status: active, suspended, audit, terminated
   status: varchar("status", { length: 20 }).default("active").notNull(),
   suspended_reason: text("suspended_reason"),
   suspended_at: timestamp("suspended_at"),
-  
+
   // Audit flags
   under_audit: boolean("under_audit").default(false).notNull(),
   audit_started_at: timestamp("audit_started_at"),
   audit_notes: text("audit_notes"),
-  
+
   // Owner user (master admin of this franchise)
   owner_user_id: varchar("owner_user_id").references(() => users.id),
-  
+
   // Onboarding status: pending_contract, pending_payment, pending_approval, active, rejected
   onboarding_status: varchar("onboarding_status", { length: 30 }).default("pending_contract").notNull(),
   onboarding_started_at: timestamp("onboarding_started_at"),
   onboarding_completed_at: timestamp("onboarding_completed_at"),
-  
+
   // Contract acceptance
   contract_accepted: boolean("contract_accepted").default(false).notNull(),
   contract_accepted_at: timestamp("contract_accepted_at"),
   contract_accepted_by: varchar("contract_accepted_by").references(() => users.id),
   contract_version: varchar("contract_version", { length: 20 }), // Version of contract accepted
-  
+
   // Fee payment status
   fee_paid: boolean("fee_paid").default(false).notNull(),
   fee_paid_at: timestamp("fee_paid_at"),
   fee_payment_reference: varchar("fee_payment_reference", { length: 100 }),
   fee_payment_method: varchar("fee_payment_method", { length: 30 }), // pix, stripe, bank_transfer
-  
+
   // Approval by franqueadora
   approved_by: varchar("approved_by").references(() => users.id),
   approved_at: timestamp("approved_at"),
   rejection_reason: text("rejection_reason"),
-  
+
   // Master Franchise configuration
   is_master_franchise: boolean("is_master_franchise").default(false).notNull(),
   parent_master_id: varchar("parent_master_id").references(() => franchises.id), // If this is a sub-franchise
-  
+
   // Territory configuration
   territory_country: varchar("territory_country", { length: 3 }), // ISO 3166-1 alpha-3
   territory_state: varchar("territory_state", { length: 50 }),
   territory_city: varchar("territory_city", { length: 100 }),
   territory_region: varchar("territory_region", { length: 100 }), // Custom region name
   territory_exclusive: boolean("territory_exclusive").default(false), // Has exclusive rights
-  
+
   // Tax Profile for Trading (transferred from Settings)
   tax_country: varchar("tax_country", { length: 3 }), // BR, US, EU, AE, SG
   tax_year: integer("tax_year"),
   tax_short_term_rate: decimal("tax_short_term_rate", { precision: 5, scale: 2 }), // % short-term capital gains
   tax_long_term_rate: decimal("tax_long_term_rate", { precision: 5, scale: 2 }), // % long-term capital gains
   tax_min_taxable: decimal("tax_min_taxable", { precision: 12, scale: 2 }), // Minimum taxable amount (USD)
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -2246,21 +2246,21 @@ export type Franchise = typeof franchises.$inferSelect;
 // Franchise Users - links users to franchises with specific roles
 export const franchise_users = pgTable("franchise_users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   franchise_id: varchar("franchise_id").notNull().references(() => franchises.id, { onDelete: 'cascade' }),
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
-  
+
   // Role within franchise: master, operator, analyst, finance
   role: varchar("role", { length: 20 }).notNull().default("operator"),
-  
+
   // Permissions (granular control)
   permissions: jsonb("permissions"), // { view_reports: true, create_campaigns: true, manage_users: false }
-  
+
   is_active: boolean("is_active").default(true).notNull(),
   invited_by: varchar("invited_by").references(() => users.id),
   invited_at: timestamp("invited_at").defaultNow().notNull(),
   accepted_at: timestamp("accepted_at"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -2283,40 +2283,40 @@ export type FranchiseUser = typeof franchise_users.$inferSelect;
 // Each franchise has its own Kraken (or other exchange) credentials for isolated trading
 export const franchise_exchange_accounts = pgTable("franchise_exchange_accounts", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   franchise_id: varchar("franchise_id").notNull().references(() => franchises.id, { onDelete: 'cascade' }),
-  
+
   // Exchange identification
   exchange: varchar("exchange", { length: 20 }).default("kraken").notNull(), // kraken, binance, coinbase, etc.
   exchange_label: varchar("exchange_label", { length: 100 }), // Custom label: "Kraken Main", "Kraken Backup"
-  
+
   // Encrypted API credentials (AES-256-GCM via encryptionService)
   api_key_encrypted: text("api_key_encrypted").notNull(),
   api_secret_encrypted: text("api_secret_encrypted").notNull(),
-  
+
   // Optional: API passphrase for exchanges that require it (e.g., Coinbase Pro)
   api_passphrase_encrypted: text("api_passphrase_encrypted"),
-  
+
   // Permission flags (what this API key can do)
   can_read_balance: boolean("can_read_balance").default(true).notNull(),
   can_trade: boolean("can_trade").default(false).notNull(), // Requires explicit opt-in
   can_withdraw: boolean("can_withdraw").default(false).notNull(), // Should almost always be false
-  
+
   // Status
   is_active: boolean("is_active").default(true).notNull(),
   is_verified: boolean("is_verified").default(false).notNull(), // Set after successful API test
   verified_at: timestamp("verified_at"),
   last_used_at: timestamp("last_used_at"),
-  
+
   // Rate limiting and usage tracking
   daily_request_count: integer("daily_request_count").default(0).notNull(),
   last_request_at: timestamp("last_request_at"),
-  
+
   // Error tracking
   consecutive_errors: integer("consecutive_errors").default(0).notNull(),
   last_error: text("last_error"),
   last_error_at: timestamp("last_error_at"),
-  
+
   // Audit
   created_by: varchar("created_by").references(() => users.id),
   created_at: timestamp("created_at").defaultNow().notNull(),
@@ -2346,39 +2346,39 @@ export type FranchiseExchangeAccount = typeof franchise_exchange_accounts.$infer
 // Franchise Royalties - monthly royalty calculations and payments
 export const franchise_royalties = pgTable("franchise_royalties", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   franchise_id: varchar("franchise_id").notNull().references(() => franchises.id, { onDelete: 'cascade' }),
-  
+
   // Period
   period_start: timestamp("period_start").notNull(),
   period_end: timestamp("period_end").notNull(),
   period_month: integer("period_month").notNull(), // 1-12
   period_year: integer("period_year").notNull(),
-  
+
   // Financial calculations
   gross_pnl: decimal("gross_pnl", { precision: 20, scale: 2 }).notNull(), // Total PnL before fees
   fees_deducted: decimal("fees_deducted", { precision: 20, scale: 2 }).default("0").notNull(), // Exchange fees, slippage
   audit_adjustments: decimal("audit_adjustments", { precision: 20, scale: 2 }).default("0").notNull(), // Adjustments from audit
   net_profit: decimal("net_profit", { precision: 20, scale: 2 }).notNull(), // gross_pnl - fees - adjustments
-  
+
   royalty_percentage: decimal("royalty_percentage", { precision: 5, scale: 2 }).notNull(), // Rate applied
   royalty_amount: decimal("royalty_amount", { precision: 20, scale: 2 }).notNull(), // net_profit * percentage
-  
+
   // Breakdown by campaign
   campaign_breakdown: jsonb("campaign_breakdown"), // [{ campaign_id, name, pnl, royalty }]
-  
+
   // Payment status: pending, invoiced, paid, disputed
   status: varchar("status", { length: 20 }).default("pending").notNull(),
-  
+
   // Payment details
   invoice_url: text("invoice_url"),
   payment_method: varchar("payment_method", { length: 20 }), // pix, stripe, bank_transfer
   payment_reference: varchar("payment_reference", { length: 100 }),
   paid_at: timestamp("paid_at"),
-  
+
   // Audit signature (hash for immutability)
   audit_hash: varchar("audit_hash", { length: 64 }), // SHA-256 of calculation data
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -2399,42 +2399,42 @@ export type FranchiseRoyalty = typeof franchise_royalties.$inferSelect;
 // Franchise Fees - one-time entry fees paid to join the franchise
 export const franchise_fees = pgTable("franchise_fees", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   franchise_id: varchar("franchise_id").notNull().references(() => franchises.id, { onDelete: 'cascade' }),
   plan_id: varchar("plan_id").notNull().references(() => franchise_plans.id),
-  
+
   // Fee details
   fee_type: varchar("fee_type", { length: 30 }).default("entry").notNull(), // entry, renewal, upgrade
   amount_usd: decimal("amount_usd", { precision: 12, scale: 2 }).notNull(),
   currency: varchar("currency", { length: 3 }).default("USD").notNull(),
   amount_local: decimal("amount_local", { precision: 12, scale: 2 }), // Amount in local currency if different
   exchange_rate: decimal("exchange_rate", { precision: 10, scale: 6 }), // USD to local currency rate
-  
+
   // Payment status: pending, processing, paid, failed, refunded
   status: varchar("status", { length: 20 }).default("pending").notNull(),
-  
+
   // Payment details
   payment_method: varchar("payment_method", { length: 30 }), // pix, stripe, bank_transfer, crypto
   payment_reference: varchar("payment_reference", { length: 100 }),
   payment_gateway_id: varchar("payment_gateway_id", { length: 100 }), // External payment ID
-  
+
   // Invoice info
   invoice_number: varchar("invoice_number", { length: 50 }),
   invoice_url: text("invoice_url"),
-  
+
   // Due date and payment dates
   due_date: timestamp("due_date"),
   paid_at: timestamp("paid_at"),
-  
+
   // Refund info
   refunded_at: timestamp("refunded_at"),
   refund_reason: text("refund_reason"),
   refund_amount: decimal("refund_amount", { precision: 12, scale: 2 }),
-  
+
   // Audit
   processed_by: varchar("processed_by").references(() => users.id),
   notes: text("notes"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -2456,25 +2456,25 @@ export type FranchiseFee = typeof franchise_fees.$inferSelect;
 // Audit Logs - immutable append-only log for franchise compliance (blockchain-style)
 export const franchise_audit_logs = pgTable("franchise_audit_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   franchise_id: varchar("franchise_id").notNull().references(() => franchises.id, { onDelete: 'cascade' }),
   campaign_id: varchar("campaign_id").references(() => campaigns.id, { onDelete: 'set null' }),
   user_id: varchar("user_id").references(() => users.id, { onDelete: 'set null' }),
-  
+
   // Event type: campaign_created, campaign_paused, campaign_ended, trade_executed, pnl_recorded, royalty_calculated
   event_type: varchar("event_type", { length: 50 }).notNull(),
-  
+
   // Event data (immutable snapshot)
   event_data: jsonb("event_data").notNull(), // Full event payload
-  
+
   // Cryptographic integrity
   previous_hash: varchar("previous_hash", { length: 64 }), // Hash of previous log entry (chain)
   entry_hash: varchar("entry_hash", { length: 64 }).notNull(), // SHA-256 of this entry
-  
+
   // Digital signature (optional, for critical events)
   signature: text("signature"),
   signed_by: varchar("signed_by", { length: 50 }), // system, admin, auditor
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_franchise_audit_franchise").on(table.franchise_id),
@@ -2493,49 +2493,49 @@ export type FranchiseAuditLog = typeof franchise_audit_logs.$inferSelect;
 // Franchise Invoices - consolidated billing documents for royalties and fees
 export const franchise_invoices = pgTable("franchise_invoices", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   franchise_id: varchar("franchise_id").notNull().references(() => franchises.id, { onDelete: 'cascade' }),
-  
+
   // Invoice identification
   invoice_number: varchar("invoice_number", { length: 50 }).notNull(),
-  
+
   // Invoice type: royalty, fee, mixed
   invoice_type: varchar("invoice_type", { length: 20 }).default("royalty").notNull(),
-  
+
   // Period covered
   period_start: timestamp("period_start").notNull(),
   period_end: timestamp("period_end").notNull(),
-  
+
   // Amounts
   subtotal: decimal("subtotal", { precision: 12, scale: 2 }).notNull(),
   tax_amount: decimal("tax_amount", { precision: 12, scale: 2 }).default("0").notNull(),
   total_amount: decimal("total_amount", { precision: 12, scale: 2 }).notNull(),
   currency: varchar("currency", { length: 3 }).default("USD").notNull(),
-  
+
   // Status: draft, sent, paid, overdue, cancelled
   status: varchar("status", { length: 20 }).default("draft").notNull(),
-  
+
   // Related records (JSON array of IDs)
   royalty_ids: jsonb("royalty_ids"), // Array of franchise_royalties IDs
   fee_ids: jsonb("fee_ids"), // Array of franchise_fees IDs
-  
+
   // Invoice details
   line_items: jsonb("line_items"), // Detailed breakdown
   notes: text("notes"),
-  
+
   // Payment details
   payment_method: varchar("payment_method", { length: 30 }),
   payment_reference: varchar("payment_reference", { length: 100 }),
-  
+
   // Dates
   issued_at: timestamp("issued_at"),
   due_date: timestamp("due_date"),
   paid_at: timestamp("paid_at"),
   sent_at: timestamp("sent_at"),
-  
+
   // PDF/document storage
   document_url: text("document_url"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -2558,40 +2558,40 @@ export type FranchiseInvoice = typeof franchise_invoices.$inferSelect;
 // Fraud Alerts - detects suspicious trading patterns for anti-fraud monitoring
 export const fraud_alerts = pgTable("fraud_alerts", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Related entities
   franchise_id: varchar("franchise_id").references(() => franchises.id, { onDelete: 'cascade' }),
   campaign_id: varchar("campaign_id").references(() => campaigns.id, { onDelete: 'set null' }),
   user_id: varchar("user_id").references(() => users.id, { onDelete: 'set null' }),
-  
+
   // Alert type: abnormal_volume, atypical_hours, rapid_position_changes, suspicious_win_rate, unusual_pattern
   alert_type: varchar("alert_type", { length: 50 }).notNull(),
-  
+
   // Severity: low, medium, high, critical
   severity: varchar("severity", { length: 20 }).notNull(),
-  
+
   // Status: new, investigating, dismissed, confirmed
   status: varchar("status", { length: 20 }).default("new").notNull(),
-  
+
   // Alert details
   title: text("title").notNull(),
   description: text("description").notNull(),
-  
+
   // Detection data (evidence snapshot)
   detection_data: jsonb("detection_data"), // { metric_name, actual_value, threshold, deviation_pct, ... }
-  
+
   // Symbol/asset involved (if applicable)
   symbol: text("symbol"),
-  
+
   // Time window of suspicious activity
   activity_start: timestamp("activity_start"),
   activity_end: timestamp("activity_end"),
-  
+
   // Resolution details
   investigated_by: varchar("investigated_by").references(() => users.id, { onDelete: 'set null' }),
   investigated_at: timestamp("investigated_at"),
   resolution_notes: text("resolution_notes"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -2618,7 +2618,7 @@ export type FraudAlert = typeof fraud_alerts.$inferSelect;
 // Market Regimes - classification of market conditions
 export const MARKET_REGIMES = [
   'VOLATILITY_EXPANSION',
-  'VOLATILITY_CONTRACTION', 
+  'VOLATILITY_CONTRACTION',
   'MOMENTUM_BULL',
   'MOMENTUM_BEAR',
   'MEAN_REVERSION',
@@ -2640,53 +2640,53 @@ export const OPPORTUNITY_TYPES = [
 // Opportunity Blueprints - AI-detected trading opportunities (immutable objects)
 export const opportunity_blueprints = pgTable("opportunity_blueprints", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // User/Franchise context
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
   franchise_id: varchar("franchise_id").references(() => franchises.id, { onDelete: 'set null' }),
-  
+
   // Blueprint classification
   type: varchar("type", { length: 10 }).notNull(), // CO-01, CO-02, etc.
   regime: varchar("regime", { length: 30 }).notNull(), // VOLATILITY_EXPANSION, MEAN_REVERSION, etc.
-  
+
   // Scoring (0-100)
   opportunity_score: integer("opportunity_score").notNull(), // Overall score
   confidence: decimal("confidence", { precision: 5, scale: 4 }).notNull(), // 0.0000 - 1.0000
-  
+
   // Assets recommended
   assets: text("assets").array().notNull(), // Array of symbols: ["BTC/USD", "ETH/USD"]
-  
+
   // Campaign parameters (JSON for flexibility)
   campaign_parameters: jsonb("campaign_parameters").notNull(), // { duration_days, capital_allocation_pct, etc. }
-  
+
   // Risk parameters specific to this opportunity
   risk_parameters: jsonb("risk_parameters").notNull(), // { max_position_size, stop_loss_pct, take_profit_pct, etc. }
-  
+
   // Execution logic
   execution_logic: jsonb("execution_logic").notNull(), // { entry_conditions, exit_conditions, time_constraints }
-  
+
   // AI explanation (human-readable and auditable)
   explanation: jsonb("explanation").notNull(), // { thesis, rationale, historical_evidence, risk_factors }
-  
+
   // Status: ACTIVE, EXPIRED, CONSUMED
   status: varchar("status", { length: 20 }).default("ACTIVE").notNull(),
-  
+
   // Lifecycle timestamps
   expires_at: timestamp("expires_at").notNull(), // Blueprint validity window
   consumed_at: timestamp("consumed_at"), // When blueprint was accepted
   consumed_by_campaign_id: varchar("consumed_by_campaign_id").references(() => campaigns.id, { onDelete: 'set null' }),
-  
+
   // Immutability hash (SHA-256 of blueprint data at creation)
   creation_hash: varchar("creation_hash", { length: 64 }).notNull(),
-  
+
   // Detection metadata
   detection_source: varchar("detection_source", { length: 30 }).default("ai_engine").notNull(), // ai_engine, manual, hybrid
   detection_model: varchar("detection_model", { length: 50 }), // gpt-4o, custom_model, etc.
   detection_latency_ms: integer("detection_latency_ms"),
-  
+
   // Market context at detection time
   market_context: jsonb("market_context"), // { btc_price, total_market_cap, volatility_index, etc. }
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -2712,37 +2712,37 @@ export type OpportunityBlueprint = typeof opportunity_blueprints.$inferSelect;
 // Opportunity Windows - persisted detection results from OpportunityEngine
 export const opportunity_windows = pgTable("opportunity_windows", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Window type (REGIME_TRANSITION, CLUSTER_MOMENTUM, etc.)
   type: varchar("type", { length: 30 }).notNull(),
-  
+
   // VRE regime at detection time
   vre_regime: varchar("vre_regime", { length: 20 }).notNull(),
-  
+
   // Cluster context
   cluster_id: integer("cluster_id").notNull(),
   cluster_name: varchar("cluster_name", { length: 50 }).notNull(),
-  
+
   // Scoring
   score: decimal("score", { precision: 5, scale: 4 }).notNull(),
   cos_score: decimal("cos_score", { precision: 5, scale: 4 }).notNull(),
-  
+
   // Window details
   thesis: text("thesis").notNull(),
   strength: varchar("strength", { length: 20 }).notNull(),
   expected_duration_hours: integer("expected_duration_hours").notNull(),
-  
+
   // Recommended assets
   recommended_assets: text("recommended_assets").array().notNull(),
-  
+
   // Content fingerprint for deduplication across expiry cycles (SHA-256 of type+regime+cluster)
   content_hash: varchar("content_hash", { length: 64 }).notNull(),
-  
+
   // Lifecycle
   expires_at: timestamp("expires_at").notNull(),
   consumed: boolean("consumed").default(false).notNull(),
   consumed_by_blueprint_id: varchar("consumed_by_blueprint_id"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_windows_expires").on(table.expires_at),
@@ -2764,22 +2764,22 @@ export type OpportunityWindow = typeof opportunity_windows.$inferSelect;
 // Rate Limit Counters - persistent rate limiting across restarts
 export const rate_limit_counters = pgTable("rate_limit_counters", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Endpoint identifier (e.g., 'opportunity_detection', 'blueprint_generation')
   endpoint: varchar("endpoint", { length: 50 }).notNull(),
-  
+
   // Counter for current window
   count: integer("count").default(0).notNull(),
-  
+
   // Window start time (counters reset when window expires)
   window_start: timestamp("window_start").defaultNow().notNull(),
-  
+
   // Window duration in seconds (e.g., 60 for per-minute limits)
   window_seconds: integer("window_seconds").default(60).notNull(),
-  
+
   // Maximum allowed requests per window
   max_requests: integer("max_requests").default(5).notNull(),
-  
+
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("uq_rate_limit_endpoint").on(table.endpoint),
@@ -2795,34 +2795,34 @@ export type RateLimitCounter = typeof rate_limit_counters.$inferSelect;
 // Opportunity Triggers - automation rules for blueprints
 export const opportunity_triggers = pgTable("opportunity_triggers", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // User context (triggers are user-specific)
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
-  
+
   // Trigger type: alert, expiration, accept, creation, block, audit
   trigger_type: varchar("trigger_type", { length: 20 }).notNull(),
-  
+
   // Trigger name and description
   name: varchar("name", { length: 100 }).notNull(),
   description: text("description"),
-  
+
   // Trigger conditions (JSON logic)
   conditions: jsonb("conditions").notNull(), // { score_min: 75, confidence_min: 0.70, regimes: [...] }
-  
+
   // Actions to execute when triggered
   actions: jsonb("actions").notNull(), // { notify_whatsapp: true, notify_email: true, auto_accept: false }
-  
+
   // Rate limiting
   cooldown_minutes: integer("cooldown_minutes").default(60).notNull(), // Min time between triggers
   max_triggers_per_day: integer("max_triggers_per_day").default(10).notNull(),
-  
+
   // Status
   is_active: boolean("is_active").default(true).notNull(),
-  
+
   // Execution counters
   trigger_count: integer("trigger_count").default(0).notNull(),
   last_triggered_at: timestamp("last_triggered_at"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -2844,27 +2844,27 @@ export type OpportunityTrigger = typeof opportunity_triggers.$inferSelect;
 // Opportunity Trigger Events - log of all trigger executions
 export const opportunity_trigger_events = pgTable("opportunity_trigger_events", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // References
   trigger_id: varchar("trigger_id").notNull().references(() => opportunity_triggers.id, { onDelete: 'cascade' }),
   blueprint_id: varchar("blueprint_id").references(() => opportunity_blueprints.id, { onDelete: 'set null' }),
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
-  
+
   // Event type: alert_sent, expiration_processed, accept_validated, campaign_created, blocked, audit_logged
   event_type: varchar("event_type", { length: 30 }).notNull(),
-  
+
   // Event status: success, failed, blocked, rate_limited
   status: varchar("status", { length: 20 }).notNull(),
-  
+
   // Event details
   event_data: jsonb("event_data"), // { notification_channel, campaign_id, error_message, etc. }
-  
+
   // Error tracking
   error_message: text("error_message"),
-  
+
   // Processing metrics
   processing_time_ms: integer("processing_time_ms"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_trigger_events_trigger").on(table.trigger_id),
@@ -2885,38 +2885,38 @@ export type OpportunityTriggerEvent = typeof opportunity_trigger_events.$inferSe
 // Opportunity Campaigns - campaigns created from blueprints (Campaign Opportunities / CO)
 export const opportunity_campaigns = pgTable("opportunity_campaigns", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Source blueprint
   blueprint_id: varchar("blueprint_id").notNull().references(() => opportunity_blueprints.id, { onDelete: 'cascade' }),
-  
+
   // Generated campaign
   campaign_id: varchar("campaign_id").notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
-  
+
   // User/Franchise context
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
   franchise_id: varchar("franchise_id").references(() => franchises.id, { onDelete: 'set null' }),
-  
+
   // Capital allocation
   allocated_capital: decimal("allocated_capital", { precision: 20, scale: 2 }).notNull(),
-  
+
   // Performance tracking specific to CO
   realized_pnl: decimal("realized_pnl", { precision: 20, scale: 2 }).default("0").notNull(),
   unrealized_pnl: decimal("unrealized_pnl", { precision: 20, scale: 2 }).default("0").notNull(),
   roi_percentage: decimal("roi_percentage", { precision: 10, scale: 4 }).default("0").notNull(),
-  
+
   // Blueprint thesis validation
   thesis_validated: boolean("thesis_validated"), // Was the opportunity thesis correct?
   validation_notes: text("validation_notes"),
-  
+
   // Audit flag (CO has reinforced audit)
   enhanced_audit: boolean("enhanced_audit").default(true).notNull(),
-  
+
   // Status: active, completed, stopped, failed
   status: varchar("status", { length: 20 }).default("active").notNull(),
-  
+
   started_at: timestamp("started_at").defaultNow().notNull(),
   completed_at: timestamp("completed_at"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -2940,34 +2940,34 @@ export type OpportunityCampaign = typeof opportunity_campaigns.$inferSelect;
 // Opportunity AI Logs - audit trail of AI detection decisions
 export const opportunity_ai_logs = pgTable("opportunity_ai_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // User context
   user_id: varchar("user_id").references(() => users.id, { onDelete: 'set null' }),
-  
+
   // Blueprint (if one was generated)
   blueprint_id: varchar("blueprint_id").references(() => opportunity_blueprints.id, { onDelete: 'set null' }),
-  
+
   // Analysis type: market_scan, opportunity_detection, thesis_validation, risk_assessment
   analysis_type: varchar("analysis_type", { length: 30 }).notNull(),
-  
+
   // Model used
   model: varchar("model", { length: 50 }).notNull(), // gpt-4o, gpt-4o-mini, custom
-  
+
   // Input context (what the AI analyzed)
   input_context: jsonb("input_context"), // { symbols_analyzed, market_data, historical_data }
-  
+
   // AI output
   output: jsonb("output").notNull(), // Full AI response
-  
+
   // Decision
   opportunity_detected: boolean("opportunity_detected").default(false).notNull(),
   rejection_reason: text("rejection_reason"), // If no opportunity, why?
-  
+
   // Performance metrics
   tokens_used: integer("tokens_used").notNull(),
   latency_ms: integer("latency_ms").notNull(),
   cost_usd: decimal("cost_usd", { precision: 10, scale: 6 }),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_opp_ai_logs_user").on(table.user_id),
@@ -3005,43 +3005,43 @@ export type CORejectionReason = typeof CO_REJECTION_REASONS[number];
 
 export const co_decision_history = pgTable("co_decision_history", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Blueprint being evaluated
   blueprint_id: varchar("blueprint_id").notNull().references(() => opportunity_blueprints.id, { onDelete: 'cascade' }),
-  
+
   // User context
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
   franchise_id: varchar("franchise_id").references(() => franchises.id, { onDelete: 'set null' }),
-  
+
   // Decision details
   decision: varchar("decision", { length: 20 }).notNull(), // approved, rejected, expired, auto_approved, auto_rejected
   decision_reason: varchar("decision_reason", { length: 50 }), // Reason code from CO_REJECTION_REASONS
   decision_notes: text("decision_notes"), // Human-readable explanation
-  
+
   // Actor information
   decided_by: varchar("decided_by", { length: 20 }).notNull(), // 'user', 'system', 'governance_engine', 'admin'
   decided_by_user_id: varchar("decided_by_user_id").references(() => users.id, { onDelete: 'set null' }),
-  
+
   // Governance validation state at decision time
   governance_check: jsonb("governance_check").notNull(), // { var_ok, es_ok, capital_ok, conflict_ok, franchise_ok }
-  
+
   // Risk metrics snapshot at decision time
   risk_snapshot: jsonb("risk_snapshot"), // { var_95, es_95, current_exposure, active_campaigns, etc. }
-  
+
   // Market context at decision time
   market_snapshot: jsonb("market_snapshot"), // { btc_price, volatility, regime }
-  
+
   // Resulting campaign (if approved)
   resulting_campaign_id: varchar("resulting_campaign_id").references(() => campaigns.id, { onDelete: 'set null' }),
-  
+
   // Immutability (hash chain for audit trail)
   entry_hash: varchar("entry_hash", { length: 64 }).notNull(),
   previous_hash: varchar("previous_hash", { length: 64 }), // Links to previous decision for this user
-  
+
   // Digital signature for critical decisions
   signature: varchar("signature", { length: 128 }),
   signature_algorithm: varchar("signature_algorithm", { length: 30 }),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_co_decision_blueprint").on(table.blueprint_id),
@@ -3089,15 +3089,15 @@ export type AdjustmentIndex = typeof ADJUSTMENT_INDEXES[number];
 // Each version contains all 9 tabs of configuration
 export const franchise_plan_versions = pgTable("franchise_plan_versions", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Reference to parent plan
   plan_id: varchar("plan_id").notNull().references(() => franchise_plans.id, { onDelete: 'cascade' }),
-  
+
   // Version info
   version: integer("version").notNull(),
   version_status: varchar("version_status", { length: 20 }).default("draft").notNull(), // draft, active, archived
   version_notes: text("version_notes"), // Changes description
-  
+
   // === Aba 2: Taxa de Franquia ===
   franchise_fee: decimal("franchise_fee", { precision: 12, scale: 2 }).notNull(), // R$ value
   fee_periodicity_months: integer("fee_periodicity_months").default(1).notNull(), // 1, 3, 6, 12 months
@@ -3108,53 +3108,53 @@ export const franchise_plan_versions = pgTable("franchise_plan_versions", {
   late_payment_penalty_pct: decimal("late_payment_penalty_pct", { precision: 5, scale: 2 }).default("2").notNull(), // %
   late_payment_interest_pct: decimal("late_payment_interest_pct", { precision: 5, scale: 2 }).default("1").notNull(), // % per month
   payment_tolerance_days: integer("payment_tolerance_days").default(3).notNull(),
-  
+
   // === Aba 3: Limites de Campanhas ===
   max_simultaneous_campaigns: integer("max_simultaneous_campaigns").default(1).notNull(),
   max_standard_campaigns: integer("max_standard_campaigns").default(5).notNull(),
   max_opportunity_campaigns: integer("max_opportunity_campaigns").default(0).notNull(), // CO limit
   campaign_cooldown_hours: integer("campaign_cooldown_hours").default(24).notNull(),
-  
+
   // === Aba 4: Capital e Exposição ===
   max_total_capital: decimal("max_total_capital", { precision: 20, scale: 2 }).notNull(), // R$ or USD
   max_capital_per_campaign_pct: decimal("max_capital_per_campaign_pct", { precision: 5, scale: 2 }).default("50").notNull(),
   max_capital_per_co_pct: decimal("max_capital_per_co_pct", { precision: 5, scale: 2 }).default("25").notNull(),
   max_exposure_per_asset_pct: decimal("max_exposure_per_asset_pct", { precision: 5, scale: 2 }).default("20").notNull(),
   max_exposure_per_cluster_pct: decimal("max_exposure_per_cluster_pct", { precision: 5, scale: 2 }).default("40").notNull(),
-  
+
   // === Aba 5: Perfis de Risco ===
   allowed_risk_profiles: text("allowed_risk_profiles").array().default([]).notNull(), // conservative, moderate, aggressive
   max_risk_per_trade_pct: decimal("max_risk_per_trade_pct", { precision: 5, scale: 2 }).default("2").notNull(),
   max_drawdown_per_campaign_pct: decimal("max_drawdown_per_campaign_pct", { precision: 5, scale: 2 }).default("10").notNull(),
   allow_risk_customization: boolean("allow_risk_customization").default(false).notNull(),
-  
+
   // === Aba 6: IA & Campanhas de Oportunidade ===
   ai_access_level: varchar("ai_access_level", { length: 20 }).default("none").notNull(), // none, alerts, alerts_co
   max_cos_per_period: integer("max_cos_per_period").default(0).notNull(),
   co_period_days: integer("co_period_days").default(30).notNull(), // Period for CO limit
   min_opportunity_score: integer("min_opportunity_score").default(75).notNull(), // 0-100
   allow_blueprint_adjustment: boolean("allow_blueprint_adjustment").default(false).notNull(),
-  
+
   // === Aba 7: Gatilhos e Automação ===
   risk_triggers_enabled: boolean("risk_triggers_enabled").default(true).notNull(), // Always ON
   performance_triggers_enabled: boolean("performance_triggers_enabled").default(true).notNull(),
   benchmark_triggers_enabled: boolean("benchmark_triggers_enabled").default(false).notNull(),
   auto_rebalance_enabled: boolean("auto_rebalance_enabled").default(false).notNull(),
   min_audit_frequency_hours: integer("min_audit_frequency_hours").default(8).notNull(),
-  
+
   // === Aba 8: Royalties por Performance ===
   royalty_model: varchar("royalty_model", { length: 20 }).default("fixed").notNull(), // fixed, dynamic_prs
   royalty_min_pct: decimal("royalty_min_pct", { precision: 5, scale: 2 }).default("10").notNull(),
   royalty_max_pct: decimal("royalty_max_pct", { precision: 5, scale: 2 }).default("30").notNull(),
   royalty_applies_to_cos: boolean("royalty_applies_to_cos").default(true).notNull(),
   royalty_calculation_period: varchar("royalty_calculation_period", { length: 20 }).default("monthly").notNull(), // weekly, monthly, quarterly
-  
+
   // === Aba 9: Governança & Compliance ===
   audit_level: varchar("audit_level", { length: 20 }).default("standard").notNull(), // standard, reinforced
   allow_auto_downgrade: boolean("allow_auto_downgrade").default(false).notNull(), // Auto downgrade on non-payment
   suspension_policy_days: integer("suspension_policy_days").default(30).notNull(), // Days before suspension
   antifraud_tolerance: integer("antifraud_tolerance").default(3).notNull(), // Number of events before action
-  
+
   // Audit trail
   created_by: varchar("created_by").references(() => users.id, { onDelete: 'set null' }),
   activated_at: timestamp("activated_at"),
@@ -3179,23 +3179,23 @@ export type FranchisePlanVersion = typeof franchise_plan_versions.$inferSelect;
 // Franchise Plan Audit Log - tracks all changes for compliance
 export const franchise_plan_audit_logs = pgTable("franchise_plan_audit_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   plan_id: varchar("plan_id").notNull().references(() => franchise_plans.id, { onDelete: 'cascade' }),
   version_id: varchar("version_id").references(() => franchise_plan_versions.id, { onDelete: 'set null' }),
-  
+
   // Action: created, version_created, activated, suspended, archived
   action: varchar("action", { length: 30 }).notNull(),
-  
+
   // Changes summary
   changes_summary: text("changes_summary"),
-  
+
   // Full diff for audit (old values vs new values)
   old_values: jsonb("old_values"),
   new_values: jsonb("new_values"),
-  
+
   // Actor
   performed_by: varchar("performed_by").references(() => users.id, { onDelete: 'set null' }),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_plan_audit_plan").on(table.plan_id),
@@ -3222,134 +3222,134 @@ export type FranchisePlanWithVersion = FranchisePlan & {
 
 export const custom_risk_profiles = pgTable("custom_risk_profiles", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Owner
   user_id: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
   franchise_id: varchar("franchise_id").references(() => franchises.id, { onDelete: 'set null' }),
-  
+
   // Profile metadata
   name: varchar("name", { length: 100 }).notNull(),
   description: text("description"),
   version: integer("version").default(1).notNull(),
-  
+
   // Based on SUPER_AGGRESSIVE (SA) baseline
   based_on_profile: varchar("based_on_profile", { length: 2 }).default("SA").notNull(),
-  
+
   // Status: draft, active, locked, archived
   status: varchar("status", { length: 20 }).default("draft").notNull(),
-  
+
   // ========== RISK CORE PARAMETERS (editable with ranges) ==========
   // All values have min/max constraints validated at application level
-  
+
   // Risk per trade: min 0.25%, max 3.50%, default 1.75%
   risk_per_trade_pct: decimal("risk_per_trade_pct", { precision: 5, scale: 2 }).default("1.75").notNull(),
-  
+
   // Daily loss limit: min 1%, max 8%, default 5%
   daily_loss_limit_pct: decimal("daily_loss_limit_pct", { precision: 5, scale: 2 }).default("5.00").notNull(),
-  
+
   // Campaign drawdown max: min 5%, max 55%, default 30%
   dd_campaign_max_pct: decimal("dd_campaign_max_pct", { precision: 5, scale: 2 }).default("30.00").notNull(),
-  
+
   // Global drawdown max: min 8%, max 55%, default 35%
   dd_global_max_pct: decimal("dd_global_max_pct", { precision: 5, scale: 2 }).default("35.00").notNull(),
-  
+
   // Soft reduce at % of DD: min 0.60, max 0.90, default 0.80
   dd_soft_reduce_at: decimal("dd_soft_reduce_at", { precision: 3, scale: 2 }).default("0.80").notNull(),
-  
+
   // ========== EXPOSURE PARAMETERS ==========
   // Max exposure per asset: min 5%, max 55%, default 30%
   max_exposure_per_asset_pct: decimal("max_exposure_per_asset_pct", { precision: 5, scale: 2 }).default("30.00").notNull(),
-  
+
   // Max exposure per cluster: min 20%, max 85%, default 70%
   max_exposure_per_cluster_pct: decimal("max_exposure_per_cluster_pct", { precision: 5, scale: 2 }).default("70.00").notNull(),
-  
+
   // Max correlation between open positions: min 0.50, max 0.95, default 0.85
   max_corr: decimal("max_corr", { precision: 3, scale: 2 }).default("0.85").notNull(),
-  
+
   // Max open positions: min 3, max 55, default 25
   max_open_positions: integer("max_open_positions").default(25).notNull(),
-  
+
   // ========== EXECUTION GUARD PARAMETERS ==========
   // Max spread %: min 0.05%, max 0.60%, default 0.20%
   max_spread_pct: decimal("max_spread_pct", { precision: 5, scale: 4 }).default("0.0020").notNull(),
-  
+
   // Min depth USD near mid: min 10k, max 500k, default 50k
   min_depth_usd: decimal("min_depth_usd", { precision: 20, scale: 2 }).default("50000").notNull(),
-  
+
   // Max slippage %: min 0.10%, max 1.50%, default 0.40%
   max_slippage_pct: decimal("max_slippage_pct", { precision: 5, scale: 4 }).default("0.0040").notNull(),
-  
+
   // Max impact %: min 0.10%, max 1.50%, default 0.35%
   max_impact_pct: decimal("max_impact_pct", { precision: 5, scale: 4 }).default("0.0035").notNull(),
-  
+
   // ========== STOP/TP/TRAILING PARAMETERS ==========
   // Stop ATR multiplier: min 1.5, max 6.0, default 3.0
   stop_atr_mult: decimal("stop_atr_mult", { precision: 4, scale: 2 }).default("3.00").notNull(),
-  
+
   // TP1 R multiple: min 0.5, max 3.0, default 1.0
   tp1_r: decimal("tp1_r", { precision: 4, scale: 2 }).default("1.00").notNull(),
-  
+
   // TP2 R multiple: min 1.0, max 5.0, default 2.0
   tp2_r: decimal("tp2_r", { precision: 4, scale: 2 }).default("2.00").notNull(),
-  
+
   // TP1 % of position: min 10%, max 65%, default 40%
   tp1_pct: decimal("tp1_pct", { precision: 5, scale: 2 }).default("40.00").notNull(),
-  
+
   // TP2 % of position: min 10%, max 65%, default 30%
   tp2_pct: decimal("tp2_pct", { precision: 5, scale: 2 }).default("30.00").notNull(),
-  
+
   // Trail % of position: min 10%, max 85%, default 30%
   trail_pct: decimal("trail_pct", { precision: 5, scale: 2 }).default("30.00").notNull(),
-  
+
   // Trail activate after R: min 0.5, max 3.5, default 2.0
   trail_activate_after_r: decimal("trail_activate_after_r", { precision: 4, scale: 2 }).default("2.00").notNull(),
-  
+
   // Trail ATR multiplier: min 0.5, max 5.0, default 2.0
   trail_atr_mult: decimal("trail_atr_mult", { precision: 4, scale: 2 }).default("2.00").notNull(),
-  
+
   // ========== AUTOMATION PARAMETERS ==========
   // Rebalance hours: min 2, max 24, default 8
   rebalance_hours: integer("rebalance_hours").default(8).notNull(),
-  
+
   // Audit frequency hours: min 1, max 24, default 6
   audit_frequency_hours: integer("audit_frequency_hours").default(6).notNull(),
-  
+
   // Max orders per day: min 100, max 50000, default 20000
   max_orders_per_day: integer("max_orders_per_day").default(20000).notNull(),
-  
+
   // ========== ASSET FILTERS ==========
   // Min volume 24h USD: min 5M, max 500M, default 50M
   min_volume_24h_usd: decimal("min_volume_24h_usd", { precision: 20, scale: 2 }).default("50000000").notNull(),
-  
+
   // Min volatility daily %: min 1%, max 30%, default 6%
   min_volatility_daily_pct: decimal("min_volatility_daily_pct", { precision: 5, scale: 2 }).default("6.00").notNull(),
-  
+
   // Max assets per campaign: min 10, max 200, default 100
   max_assets_per_campaign: integer("max_assets_per_campaign").default(100).notNull(),
-  
+
   // ========== CLUSTER SELECTION ==========
   // Selected clusters (user can choose which to include, with restrictions)
   selected_clusters: integer("selected_clusters").array(),
-  
+
   // ========== LEVERAGE (only for FULL plan) ==========
   use_leverage: boolean("use_leverage").default(false).notNull(),
   leverage_amount: decimal("leverage_amount", { precision: 4, scale: 2 }).default("1.00").notNull(), // max 1.50
-  
+
   // ========== IMMUTABILITY & AUDIT ==========
   // Hash of all parameters at creation (for tamper detection)
   creation_hash: varchar("creation_hash", { length: 64 }),
-  
+
   // Hash chain for version history
   previous_hash: varchar("previous_hash", { length: 64 }),
-  
+
   // Locked at campaign start (cannot be modified after)
   locked_at: timestamp("locked_at"),
   locked_by_campaign_id: varchar("locked_by_campaign_id"),
-  
+
   // Legal acceptance
   legal_accepted_at: timestamp("legal_accepted_at"),
   legal_acceptance_hash: varchar("legal_acceptance_hash", { length: 64 }),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -3456,18 +3456,18 @@ export const STANDARD_PROFILE_MAX_LIMITS = {
   risk_per_trade_pct: 3.0,         // Max 3% risk per trade
   max_daily_drawdown_pct: 5.0,     // Max 5% daily drawdown
   max_drawdown_30d_pct: 15.0,      // Max 15% monthly drawdown
-  
+
   // Position limits
   max_open_positions: 15,          // Max 15 concurrent positions
   max_trades_per_day: 50,          // Max 50 trades per day
   max_position_pct_capital_per_pair: 15.0, // Max 15% per pair
   max_cluster_risk_pct: 30.0,      // Max 30% cluster exposure
-  
+
   // ATR/Technical parameters
   tp_atr_multiplier: 4.0,          // Max 4x ATR for take profit
   sl_atr_multiplier: 2.0,          // Max 2x ATR for stop loss
   max_slippage_pct: 1.0,           // Max 1% slippage tolerance
-  
+
   // Features not available for standard profiles
   custom_profile_id: false,        // Not allowed
   custom_cluster_selection: false, // Not allowed
@@ -3496,10 +3496,10 @@ function coerceToBoolean(value: any): boolean | null {
 // Returns array of exceeded parameters or empty array if all within limits
 export function checkExceedsStandardLimits(riskConfig: Record<string, any> | null | undefined): string[] {
   if (!riskConfig) return [];
-  
+
   const exceeded: string[] = [];
   const limits = STANDARD_PROFILE_MAX_LIMITS;
-  
+
   // Check numeric limits
   if (parseFloat(riskConfig.leverage_multiplier || riskConfig.leverageMultiplier || '1') > limits.leverage_multiplier) {
     exceeded.push('leverage_multiplier');
@@ -3534,46 +3534,46 @@ export function checkExceedsStandardLimits(riskConfig: Record<string, any> | nul
   if (parseFloat(riskConfig.max_slippage_pct || riskConfig.maxSlippagePct || '0.5') > limits.max_slippage_pct) {
     exceeded.push('max_slippage_pct');
   }
-  
+
   // Check boolean/presence flags that are SA/F-exclusive
   // Use coerceToBoolean to handle string/numeric truthy values
   if (riskConfig.custom_profile_id || riskConfig.customProfileId) {
     exceeded.push('custom_profile_id');
   }
-  if (riskConfig.allowed_clusters || riskConfig.allowedClusters || 
-      riskConfig.blocked_clusters || riskConfig.blockedClusters) {
+  if (riskConfig.allowed_clusters || riskConfig.allowedClusters ||
+    riskConfig.blocked_clusters || riskConfig.blockedClusters) {
     exceeded.push('custom_cluster_selection');
   }
   // Leverage enabled flag - only SA/F profiles can enable leverage
-  if (coerceToBoolean(riskConfig.leverage_enabled) === true || 
-      coerceToBoolean(riskConfig.leverageEnabled) === true) {
+  if (coerceToBoolean(riskConfig.leverage_enabled) === true ||
+    coerceToBoolean(riskConfig.leverageEnabled) === true) {
     exceeded.push('leverage_enabled');
   }
   // Allow add position is aggressive feature
-  if (coerceToBoolean(riskConfig.allow_add_position) === true || 
-      coerceToBoolean(riskConfig.allowAddPosition) === true) {
+  if (coerceToBoolean(riskConfig.allow_add_position) === true ||
+    coerceToBoolean(riskConfig.allowAddPosition) === true) {
     exceeded.push('allow_add_position');
   }
   // Circuit breaker overrides (disabling safety features)
-  if (coerceToBoolean(riskConfig.cb_daily_enabled) === false || 
-      coerceToBoolean(riskConfig.cbDailyEnabled) === false) {
+  if (coerceToBoolean(riskConfig.cb_daily_enabled) === false ||
+    coerceToBoolean(riskConfig.cbDailyEnabled) === false) {
     exceeded.push('cb_daily_disabled');
   }
-  if (coerceToBoolean(riskConfig.cb_campaign_enabled) === false || 
-      coerceToBoolean(riskConfig.cbCampaignEnabled) === false) {
+  if (coerceToBoolean(riskConfig.cb_campaign_enabled) === false ||
+    coerceToBoolean(riskConfig.cbCampaignEnabled) === false) {
     exceeded.push('cb_campaign_disabled');
   }
   // Trailing drawdown disabled (removing safety feature)
-  if (coerceToBoolean(riskConfig.use_trailing_dd) === false || 
-      coerceToBoolean(riskConfig.useTrailingDd) === false) {
+  if (coerceToBoolean(riskConfig.use_trailing_dd) === false ||
+    coerceToBoolean(riskConfig.useTrailingDd) === false) {
     exceeded.push('trailing_dd_disabled');
   }
   // ATR sizing disabled (removing dynamic sizing)
-  if (coerceToBoolean(riskConfig.use_atr_sizing) === false || 
-      coerceToBoolean(riskConfig.useAtrSizing) === false) {
+  if (coerceToBoolean(riskConfig.use_atr_sizing) === false ||
+    coerceToBoolean(riskConfig.useAtrSizing) === false) {
     exceeded.push('atr_sizing_disabled');
   }
-  
+
   return exceeded;
 }
 
@@ -3611,55 +3611,55 @@ export type MasterAccountStatus = typeof MASTER_ACCOUNT_STATUSES[number];
 // Granular territorial delimitation with multiple layers
 export const territory_definitions = pgTable("territory_definitions", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Base identification
   name: varchar("name", { length: 200 }).notNull(),
   description: text("description"),
-  
+
   // Country (required base layer)
   country_code: varchar("country_code", { length: 3 }).notNull(), // ISO 3166-1 alpha-3
-  
+
   // === Administrative Layers (optional) ===
   states: text("states").array(), // State/Province codes
   municipalities: text("municipalities").array(), // City/Municipality codes
-  
+
   // === Statistical Layers (optional, IBGE or equivalent) ===
   micro_regions: text("micro_regions").array(), // Microregion codes
   metro_regions: text("metro_regions").array(), // Metropolitan region codes
   urban_agglomerations: text("urban_agglomerations").array(), // Urban agglomeration codes
-  
+
   // === Postal Layers (optional) ===
   // Format: "start-end" for ranges, or single codes
   zip_code_ranges: text("zip_code_ranges").array(), // ["01000-02000", "05000-06000"]
   zip_code_exclusions: text("zip_code_exclusions").array(), // Specific ZIPs to exclude
-  
+
   // === Custom Economic Zone (optional) ===
   custom_economic_zone_id: varchar("custom_economic_zone_id", { length: 50 }),
   custom_economic_zone_name: varchar("custom_economic_zone_name", { length: 200 }),
-  
+
   // === Hybrid Exclusions ===
   // Example: "State X excluding capital"
   excluded_states: text("excluded_states").array(),
   excluded_municipalities: text("excluded_municipalities").array(),
-  
+
   // === Exclusivity Configuration ===
   exclusivity_type: varchar("exclusivity_type", { length: 20 }).default("exclusive").notNull(),
   max_masters_quota: integer("max_masters_quota"), // For semi_exclusive type
   overlap_allowed: boolean("overlap_allowed").default(false).notNull(),
-  
+
   // === Performance Conditions for Exclusivity ===
   // Failure to meet = partial/total loss of exclusivity
   min_franchises_sold_yearly: integer("min_franchises_sold_yearly"),
   min_regional_volume_usd: decimal("min_regional_volume_usd", { precision: 20, scale: 2 }),
   min_franchisee_retention_pct: decimal("min_franchisee_retention_pct", { precision: 5, scale: 2 }),
-  
+
   // === Audit & Immutability ===
   // REQUIRED: SHA-256 hash of territory config for tamper detection
   territory_hash: varchar("territory_hash", { length: 64 }).notNull(),
-  
+
   // Status
   is_active: boolean("is_active").default(true).notNull(),
-  
+
   // Audit trail
   created_by: varchar("created_by").references(() => users.id, { onDelete: 'set null' }),
   created_at: timestamp("created_at").defaultNow().notNull(),
@@ -3683,36 +3683,36 @@ export type TerritoryDefinition = typeof territory_definitions.$inferSelect;
 // Hybrid entity: Commercial Master + Operating Franchisee
 export const master_accounts = pgTable("master_accounts", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // === Legal Entity ===
   legal_entity_name: varchar("legal_entity_name", { length: 300 }).notNull(),
   legal_entity_tax_id: varchar("legal_entity_tax_id", { length: 50 }).notNull(), // CNPJ/Tax ID
   legal_entity_tax_id_type: varchar("legal_entity_tax_id_type", { length: 10 }).default("cnpj").notNull(),
   legal_entity_address: text("legal_entity_address"),
   legal_entity_country: varchar("legal_entity_country", { length: 3 }).default("BRA").notNull(),
-  
+
   // === Territory Assignment ===
   territory_definition_id: varchar("territory_definition_id").notNull().references(() => territory_definitions.id),
-  
+
   // === Exclusivity Status (can be revoked based on performance) ===
   exclusivity_status: varchar("exclusivity_status", { length: 20 }).default("active").notNull(), // active, warning, revoked
   exclusivity_warning_reason: text("exclusivity_warning_reason"),
   exclusivity_revoked_at: timestamp("exclusivity_revoked_at"),
-  
+
   // === Contract Information ===
   master_contract_id: varchar("master_contract_id", { length: 100 }),
   master_contract_pdf_url: text("master_contract_pdf_url"),
   contract_start_date: timestamp("contract_start_date").notNull(),
   contract_end_date: timestamp("contract_end_date"), // null = auto-renew
   contract_renewal_terms: text("contract_renewal_terms"),
-  
+
   // === Operating Franchisee Link ===
   // The Master ALSO operates as a regular franchisee for trading
   franchisee_account_id: varchar("franchisee_account_id").references(() => franchises.id),
-  
+
   // === Primary Contact User ===
   primary_user_id: varchar("primary_user_id").references(() => users.id),
-  
+
   // === Revenue Split Rules ===
   // % of franchise fee that goes to Master
   franchise_fee_split_pct: decimal("franchise_fee_split_pct", { precision: 5, scale: 2 }).default("30").notNull(),
@@ -3720,28 +3720,28 @@ export const master_accounts = pgTable("master_accounts", {
   royalty_split_pct: decimal("royalty_split_pct", { precision: 5, scale: 2 }).default("20").notNull(),
   // Custom split rules (JSON for complex scenarios)
   custom_split_rules: jsonb("custom_split_rules"),
-  
+
   // === Performance Metrics ===
   total_franchises_sold: integer("total_franchises_sold").default(0).notNull(),
   total_active_franchises: integer("total_active_franchises").default(0).notNull(),
   total_revenue_generated_usd: decimal("total_revenue_generated_usd", { precision: 20, scale: 2 }).default("0").notNull(),
   avg_franchisee_retention_pct: decimal("avg_franchisee_retention_pct", { precision: 5, scale: 2 }),
   last_performance_review_at: timestamp("last_performance_review_at"),
-  
+
   // === Status ===
   status: varchar("status", { length: 20 }).default("pending_approval").notNull(),
   suspended_reason: text("suspended_reason"),
   suspended_at: timestamp("suspended_at"),
-  
+
   // === Audit Flags ===
   under_audit: boolean("under_audit").default(false).notNull(),
   audit_started_at: timestamp("audit_started_at"),
   audit_notes: text("audit_notes"),
-  
+
   // === Antifraud Flags Count ===
   antifraud_flags_count: integer("antifraud_flags_count").default(0).notNull(),
   last_antifraud_flag_at: timestamp("last_antifraud_flag_at"),
-  
+
   // === Timestamps ===
   approved_at: timestamp("approved_at"),
   approved_by: varchar("approved_by").references(() => users.id, { onDelete: 'set null' }),
@@ -3775,31 +3775,31 @@ export type MasterAccount = typeof master_accounts.$inferSelect;
 // Contains IMMUTABLE territory snapshot to prevent disputes
 export const regional_franchise_links = pgTable("regional_franchise_links", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Master who sold/manages this franchise
   master_id: varchar("master_id").notNull().references(() => master_accounts.id, { onDelete: 'cascade' }),
-  
+
   // The franchisee account
   franchisee_id: varchar("franchisee_id").notNull().references(() => franchises.id, { onDelete: 'cascade' }),
-  
+
   // === IMMUTABLE Territory Snapshot ===
   // Captured at the moment of franchise sale
   // Prevents future territorial disputes
   territory_scope_snapshot: jsonb("territory_scope_snapshot").notNull(),
   territory_snapshot_hash: varchar("territory_snapshot_hash", { length: 64 }).notNull(),
-  
+
   // Franchisee location within territory
   franchisee_state: varchar("franchisee_state", { length: 50 }),
   franchisee_municipality: varchar("franchisee_municipality", { length: 100 }),
   franchisee_zip_code: varchar("franchisee_zip_code", { length: 20 }),
-  
+
   // === Revenue Split Tracking ===
   total_fees_earned_usd: decimal("total_fees_earned_usd", { precision: 20, scale: 2 }).default("0").notNull(),
   total_royalties_earned_usd: decimal("total_royalties_earned_usd", { precision: 20, scale: 2 }).default("0").notNull(),
-  
+
   // Status
   status: varchar("status", { length: 20 }).default("active").notNull(), // active, transferred, terminated
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -3821,36 +3821,36 @@ export type RegionalFranchiseLink = typeof regional_franchise_links.$inferSelect
 // Conditional targets for maintaining exclusivity
 export const master_performance_targets = pgTable("master_performance_targets", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   master_id: varchar("master_id").notNull().references(() => master_accounts.id, { onDelete: 'cascade' }),
-  
+
   // Target period
   period_type: varchar("period_type", { length: 20 }).notNull(), // monthly, quarterly, yearly
   period_start: timestamp("period_start").notNull(),
   period_end: timestamp("period_end").notNull(),
-  
+
   // === Target Metrics ===
   target_franchises_sold: integer("target_franchises_sold"),
   target_volume_usd: decimal("target_volume_usd", { precision: 20, scale: 2 }),
   target_retention_pct: decimal("target_retention_pct", { precision: 5, scale: 2 }),
   target_active_franchises: integer("target_active_franchises"),
-  
+
   // === Actual Results ===
   actual_franchises_sold: integer("actual_franchises_sold"),
   actual_volume_usd: decimal("actual_volume_usd", { precision: 20, scale: 2 }),
   actual_retention_pct: decimal("actual_retention_pct", { precision: 5, scale: 2 }),
   actual_active_franchises: integer("actual_active_franchises"),
-  
+
   // === Target Status ===
   status: varchar("status", { length: 20 }).default("pending").notNull(), // pending, met, partially_met, failed
-  
+
   // === Consequences if Failed ===
   exclusivity_impact: varchar("exclusivity_impact", { length: 30 }), // none, warning, partial_loss, full_revocation
   notes: text("notes"),
-  
+
   evaluated_at: timestamp("evaluated_at"),
   evaluated_by: varchar("evaluated_by").references(() => users.id, { onDelete: 'set null' }),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -3884,30 +3884,30 @@ export type MasterAntifraudFlagType = typeof MASTER_ANTIFRAUD_FLAG_TYPES[number]
 // Immutable snapshots of territory state for audit purposes
 export const master_territory_audit_snapshots = pgTable("master_territory_audit_snapshots", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   master_id: varchar("master_id").notNull().references(() => master_accounts.id, { onDelete: 'cascade' }),
   territory_definition_id: varchar("territory_definition_id").notNull().references(() => territory_definitions.id),
-  
+
   // Full snapshot of territory at this point in time
   territory_snapshot: jsonb("territory_snapshot").notNull(),
   snapshot_hash: varchar("snapshot_hash", { length: 64 }).notNull(),
-  
+
   // Reason for snapshot
   snapshot_reason: varchar("snapshot_reason", { length: 50 }).notNull(), // creation, modification, franchise_sale, audit, dispute
-  
+
   // Related event
   related_franchise_id: varchar("related_franchise_id").references(() => franchises.id, { onDelete: 'set null' }),
   related_event_description: text("related_event_description"),
-  
+
   // Cryptographic chain - forms an immutable audit trail
   // NOTE: Self-referential FK handled at application layer to avoid circular dependency
   // The chain integrity is enforced by matching previous_snapshot_hash with the actual hash
   previous_snapshot_id: varchar("previous_snapshot_id"),
   previous_snapshot_hash: varchar("previous_snapshot_hash", { length: 64 }),
-  
+
   // Chain validation flag - set to true only after verifying previous_snapshot_hash matches
   chain_validated: boolean("chain_validated").default(false).notNull(),
-  
+
   created_by: varchar("created_by").references(() => users.id, { onDelete: 'set null' }),
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
@@ -3931,59 +3931,59 @@ export type MasterTerritoryAuditSnapshot = typeof master_territory_audit_snapsho
 
 export const master_fraud_events = pgTable("master_fraud_events", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Who triggered the fraud event
   master_id: varchar("master_id").notNull().references(() => master_accounts.id, { onDelete: 'cascade' }),
-  
+
   // Fraud type - matches the antifraud flags defined in replit.md
   fraud_type: varchar("fraud_type", { length: 50 }).notNull(),
   // MASTER_TERRITORY_OVERREACH, MASTER_UNAUTHORIZED_SALE, MASTER_OVERLAP_BREACH,
   // MASTER_SELF_SPLIT_ATTEMPT, MASTER_DATA_MANIPULATION, MASTER_PRIVILEGE_ESCALATION
-  
+
   // Severity level
   severity: varchar("severity", { length: 20 }).notNull().default('medium'),
   // low, medium, high, critical
-  
+
   // Event status workflow
   status: varchar("status", { length: 20 }).notNull().default('detected'),
   // detected, investigating, confirmed, false_positive, resolved, escalated
-  
+
   // Detection context
   detection_source: varchar("detection_source", { length: 50 }).notNull(),
   // automatic, manual_report, audit, system_check
-  
+
   detection_timestamp: timestamp("detection_timestamp").defaultNow().notNull(),
-  
+
   // Evidence and context
   evidence_snapshot: jsonb("evidence_snapshot").notNull(),
   // Contains: action attempted, location, territory involved, amounts, etc.
-  
+
   related_territory_id: varchar("related_territory_id").references(() => territory_definitions.id, { onDelete: 'set null' }),
   related_franchise_id: varchar("related_franchise_id").references(() => franchises.id, { onDelete: 'set null' }),
   related_transaction_amount: decimal("related_transaction_amount", { precision: 20, scale: 8 }),
-  
+
   // Action taken
   action_taken: varchar("action_taken", { length: 50 }),
   // blocked, warned, suspended, reported_to_hq, none
-  
+
   action_details: text("action_details"),
   action_timestamp: timestamp("action_timestamp"),
   action_by: varchar("action_by").references(() => users.id, { onDelete: 'set null' }),
-  
+
   // Resolution
   resolution_notes: text("resolution_notes"),
   resolved_at: timestamp("resolved_at"),
   resolved_by: varchar("resolved_by").references(() => users.id, { onDelete: 'set null' }),
-  
+
   // Escalation
   escalated_to_hq: boolean("escalated_to_hq").default(false).notNull(),
   escalation_timestamp: timestamp("escalation_timestamp"),
   escalation_reference: varchar("escalation_reference", { length: 100 }),
-  
+
   // Metadata
   ip_address: varchar("ip_address", { length: 45 }),
   user_agent: text("user_agent"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -4008,37 +4008,37 @@ export type MasterFraudEvent = typeof master_fraud_events.$inferSelect;
 
 export const master_fraud_alerts = pgTable("master_fraud_alerts", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   fraud_event_id: varchar("fraud_event_id").notNull().references(() => master_fraud_events.id, { onDelete: 'cascade' }),
-  
+
   // Alert recipients
   alert_type: varchar("alert_type", { length: 30 }).notNull(),
   // email, sms, in_app, webhook
-  
+
   recipient_user_id: varchar("recipient_user_id").references(() => users.id, { onDelete: 'set null' }),
   recipient_email: varchar("recipient_email", { length: 255 }),
   recipient_phone: varchar("recipient_phone", { length: 20 }),
-  
+
   // Alert content
   alert_title: varchar("alert_title", { length: 200 }).notNull(),
   alert_message: text("alert_message").notNull(),
   alert_priority: varchar("alert_priority", { length: 20 }).notNull().default('normal'),
   // low, normal, high, urgent
-  
+
   // Delivery status
   status: varchar("status", { length: 20 }).notNull().default('pending'),
   // pending, sent, delivered, failed, acknowledged
-  
+
   sent_at: timestamp("sent_at"),
   delivered_at: timestamp("delivered_at"),
   acknowledged_at: timestamp("acknowledged_at"),
   acknowledged_by: varchar("acknowledged_by").references(() => users.id, { onDelete: 'set null' }),
-  
+
   // Retry tracking
   retry_count: integer("retry_count").default(0).notNull(),
   last_retry_at: timestamp("last_retry_at"),
   failure_reason: text("failure_reason"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_fraud_alert_event").on(table.fraud_event_id),
@@ -4071,40 +4071,40 @@ export type PatternConfidenceLevel = typeof PATTERN_CONFIDENCE_LEVELS[number];
 // Campaign Patterns - Learned patterns from campaign trading history
 export const campaign_patterns = pgTable("campaign_patterns", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Scope (can be global, per-portfolio, or per-campaign)
   scope: varchar("scope", { length: 20 }).notNull(), // global, portfolio, campaign
   portfolio_id: varchar("portfolio_id").references(() => portfolios.id, { onDelete: 'cascade' }),
   campaign_id: varchar("campaign_id").references(() => campaigns.id, { onDelete: 'cascade' }),
-  
+
   // Pattern identification
   pattern_type: varchar("pattern_type", { length: 30 }).notNull(),
   pattern_name: varchar("pattern_name", { length: 100 }).notNull(),
   pattern_description: text("pattern_description"),
-  
+
   // Pattern data (JSON structure varies by type)
   pattern_data: jsonb("pattern_data").notNull(),
-  
+
   // Statistical validation
   sample_size: integer("sample_size").notNull(), // Number of trades analyzed
   confidence_level: varchar("confidence_level", { length: 20 }).notNull(), // low, medium, high, very_high
   confidence_score: decimal("confidence_score", { precision: 5, scale: 4 }), // 0.0000 to 1.0000
   statistical_significance: decimal("statistical_significance", { precision: 5, scale: 4 }), // p-value
-  
+
   // Performance metrics
   expected_improvement_pct: decimal("expected_improvement_pct", { precision: 10, scale: 4 }),
   backtested: boolean("backtested").default(false).notNull(),
   backtest_result: jsonb("backtest_result"), // { pnl_impact, hit_rate_change, etc }
-  
+
   // AI analysis
   ai_reasoning: text("ai_reasoning"), // GPT explanation of pattern
   ai_recommendation: text("ai_recommendation"), // How to use this pattern
-  
+
   // Lifecycle
   is_active: boolean("is_active").default(true).notNull(),
   last_validated_at: timestamp("last_validated_at"),
   expires_at: timestamp("expires_at"), // Patterns can expire
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -4138,38 +4138,38 @@ export type OpportunityPatternType = typeof OPPORTUNITY_PATTERN_TYPES[number];
 // Opportunity Patterns - Learned patterns from opportunity decisions
 export const opportunity_patterns = pgTable("opportunity_patterns", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Scope
   scope: varchar("scope", { length: 20 }).notNull(), // global, portfolio, user
   user_id: varchar("user_id").references(() => users.id, { onDelete: 'cascade' }),
   portfolio_id: varchar("portfolio_id").references(() => portfolios.id, { onDelete: 'cascade' }),
-  
+
   // Pattern identification
   pattern_type: varchar("pattern_type", { length: 30 }).notNull(),
   pattern_name: varchar("pattern_name", { length: 100 }).notNull(),
   pattern_description: text("pattern_description"),
-  
+
   // Pattern data
   pattern_data: jsonb("pattern_data").notNull(),
-  
+
   // Validation metrics
   sample_size: integer("sample_size").notNull(),
   confidence_level: varchar("confidence_level", { length: 20 }).notNull(),
   confidence_score: decimal("confidence_score", { precision: 5, scale: 4 }),
-  
+
   // Decision impact metrics
   approval_rate_impact: decimal("approval_rate_impact", { precision: 10, scale: 4 }),
   success_rate_improvement: decimal("success_rate_improvement", { precision: 10, scale: 4 }),
   avg_pnl_improvement: decimal("avg_pnl_improvement", { precision: 10, scale: 4 }),
-  
+
   // AI analysis
   ai_reasoning: text("ai_reasoning"),
   ai_recommendation: text("ai_recommendation"),
-  
+
   // Lifecycle
   is_active: boolean("is_active").default(true).notNull(),
   last_validated_at: timestamp("last_validated_at"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -4191,39 +4191,39 @@ export type OpportunityPattern = typeof opportunity_patterns.$inferSelect;
 // Learning Run History - Track learning analysis runs
 export const learning_runs = pgTable("learning_runs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Run type
   learner_type: varchar("learner_type", { length: 30 }).notNull(), // campaign, opportunity
   run_trigger: varchar("run_trigger", { length: 30 }).notNull(), // scheduled, manual, event_based
-  
+
   // Scope
   scope: varchar("scope", { length: 20 }).notNull(),
   portfolio_id: varchar("portfolio_id").references(() => portfolios.id, { onDelete: 'cascade' }),
   campaign_id: varchar("campaign_id").references(() => campaigns.id, { onDelete: 'cascade' }),
   user_id: varchar("user_id").references(() => users.id, { onDelete: 'cascade' }),
-  
+
   // Analysis parameters
   analysis_window_start: timestamp("analysis_window_start").notNull(),
   analysis_window_end: timestamp("analysis_window_end").notNull(),
   min_sample_size: integer("min_sample_size").notNull(),
-  
+
   // Results
   status: varchar("status", { length: 20 }).notNull(), // running, completed, failed
   patterns_discovered: integer("patterns_discovered").default(0).notNull(),
   patterns_updated: integer("patterns_updated").default(0).notNull(),
   patterns_invalidated: integer("patterns_invalidated").default(0).notNull(),
-  
+
   // AI usage
   ai_tokens_used: integer("ai_tokens_used").default(0).notNull(),
   ai_model_used: varchar("ai_model_used", { length: 50 }),
-  
+
   // Performance
   duration_ms: integer("duration_ms"),
   error_message: text("error_message"),
-  
+
   // Summary
   run_summary: jsonb("run_summary"), // { insights, recommendations, metrics }
-  
+
   started_at: timestamp("started_at").defaultNow().notNull(),
   completed_at: timestamp("completed_at"),
 }, (table) => [
@@ -4245,17 +4245,17 @@ export type LearningRun = typeof learning_runs.$inferSelect;
 // VRE Decision Logs - immutable log of all VRE regime decisions
 export const vre_decision_logs = pgTable("vre_decision_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Campaign reference (nullable for standalone VRE analysis)
   campaign_id: varchar("campaign_id").references(() => campaigns.id, { onDelete: 'cascade' }),
-  
+
   // Symbol analyzed
   symbol: varchar("symbol", { length: 20 }).notNull(),
-  
+
   // Regime transition
   previous_regime: varchar("previous_regime", { length: 10 }), // LOW, NORMAL, HIGH, EXTREME
   new_regime: varchar("new_regime", { length: 10 }).notNull(),
-  
+
   // VRE metrics
   z_score: decimal("z_score", { precision: 10, scale: 6 }).notNull(),
   rv_ratio: decimal("rv_ratio", { precision: 10, scale: 6 }).notNull(),
@@ -4263,11 +4263,11 @@ export const vre_decision_logs = pgTable("vre_decision_logs", {
   rv_long: decimal("rv_long", { precision: 10, scale: 6 }).notNull(),
   rv_long_mean: decimal("rv_long_mean", { precision: 10, scale: 6 }).notNull(),
   rv_long_std: decimal("rv_long_std", { precision: 10, scale: 6 }).notNull(),
-  
+
   // Confidence and classification method
   confidence: decimal("confidence", { precision: 5, scale: 4 }).notNull(),
   method_used: varchar("method_used", { length: 20 }).notNull(), // z_score, rv_ratio
-  
+
   // State tracking
   regime_changed: boolean("regime_changed").notNull(),
   blocked_by_cooldown: boolean("blocked_by_cooldown").default(false).notNull(),
@@ -4275,10 +4275,10 @@ export const vre_decision_logs = pgTable("vre_decision_logs", {
   confirmations_count: integer("confirmations_count").default(0).notNull(),
   cycles_in_regime: integer("cycles_in_regime").default(0).notNull(),
   cooldown_remaining: integer("cooldown_remaining").default(0).notNull(),
-  
+
   // Integrity
   decision_hash: varchar("decision_hash", { length: 64 }).notNull(),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_vre_decision_campaign").on(table.campaign_id),
@@ -4298,17 +4298,17 @@ export type VreDecisionLog = typeof vre_decision_logs.$inferSelect;
 // VRE Regime Parameters - adaptive parameters by regime (Tables 1-5 from spec)
 export const vre_regime_parameters = pgTable("vre_regime_parameters", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Regime this config applies to
   regime: varchar("regime", { length: 10 }).notNull(), // LOW, NORMAL, HIGH, EXTREME
-  
+
   // Table 1: Entry Filters
   min_liquidity_percentile: decimal("min_liquidity_percentile", { precision: 5, scale: 2 }).notNull(),
   max_spread_pct: decimal("max_spread_pct", { precision: 5, scale: 3 }).notNull(),
   max_slippage_pct: decimal("max_slippage_pct", { precision: 5, scale: 3 }).notNull(),
   volume_filter_multiplier: decimal("volume_filter_multiplier", { precision: 5, scale: 2 }).notNull(), // 0.9, 1.0, 1.2, 1.5
   max_correlation_limit: decimal("max_correlation_limit", { precision: 5, scale: 2 }).notNull(), // 0.50-0.75
-  
+
   // Table 2: Stops & Take Profits (ATR-based)
   sl_atr_multiplier: decimal("sl_atr_multiplier", { precision: 5, scale: 2 }).notNull(),
   tp1_atr_multiplier: decimal("tp1_atr_multiplier", { precision: 5, scale: 2 }).notNull(),
@@ -4316,22 +4316,22 @@ export const vre_regime_parameters = pgTable("vre_regime_parameters", {
   trailing_atr_multiplier: decimal("trailing_atr_multiplier", { precision: 5, scale: 2 }),
   partial_exit_1_pct: integer("partial_exit_1_pct").notNull(), // % of position to exit at TP1
   partial_exit_2_pct: integer("partial_exit_2_pct").notNull(), // % of position to exit at TP2
-  
+
   // Table 3: Position Sizing
   m_size_multiplier: decimal("m_size_multiplier", { precision: 5, scale: 2 }).notNull(), // 0.80 to 1.25
   max_heat_pct: decimal("max_heat_pct", { precision: 5, scale: 2 }).notNull(),
-  
+
   // Table 4: Trade Frequency
   max_trades_per_6h: integer("max_trades_per_6h").notNull(),
   cooldown_after_loss_minutes: integer("cooldown_after_loss_minutes").notNull(),
   cooldown_after_win_minutes: integer("cooldown_after_win_minutes").notNull(),
-  
+
   // Table 5: Pyramiding
   pyramiding_allowed: boolean("pyramiding_allowed").default(false).notNull(),
   max_pyramid_adds: integer("max_pyramid_adds").default(0).notNull(),
   pyramid_distance_atr: decimal("pyramid_distance_atr", { precision: 5, scale: 2 }),
   pyramid_size_reduction_pct: integer("pyramid_size_reduction_pct"), // Each add is X% smaller
-  
+
   // Metadata
   is_default: boolean("is_default").default(true).notNull(),
   created_at: timestamp("created_at").defaultNow().notNull(),
@@ -4352,37 +4352,37 @@ export type VreRegimeParameters = typeof vre_regime_parameters.$inferSelect;
 // Basket Audit Trail - durable storage for basket generation and correlation audit
 export const basket_audit_logs = pgTable("basket_audit_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Basket identification
   basket_id: varchar("basket_id", { length: 64 }).notNull().unique(),
-  
+
   // Generation metadata
   generated_at: timestamp("generated_at").notNull(),
   expires_at: timestamp("expires_at").notNull(),
   generation_time_ms: integer("generation_time_ms").notNull(),
-  
+
   // Basket summary
   total_assets: integer("total_assets").notNull(),
   clusters_used: integer("clusters_used").notNull(),
   is_complete: boolean("is_complete").default(false).notNull(),
-  
+
   // Correlation audit data
   correlation_method: varchar("correlation_method", { length: 20 }).notNull(), // empirical, fallback, mixed
   empirical_coverage_pct: integer("empirical_coverage_pct").notNull(),
   avg_btc_correlation: decimal("avg_btc_correlation", { precision: 8, scale: 6 }).notNull(),
   avg_intra_cluster_correlation: decimal("avg_intra_cluster_correlation", { precision: 8, scale: 6 }).notNull(),
   assets_excluded_by_correlation: integer("assets_excluded_by_correlation").notNull(),
-  
+
   // Full audit payload (immutable snapshot)
   correlation_matrix_snapshot: jsonb("correlation_matrix_snapshot").notNull(), // CorrelationMatrixEntry[]
   pairwise_correlations: jsonb("pairwise_correlations").notNull(), // PairwiseCorrelation[]
   exclusion_events: jsonb("exclusion_events").notNull(), // CorrelationExclusionEvent[]
   cluster_baskets: jsonb("cluster_baskets").notNull(), // ClusterBasket[]
   cluster_deficits: jsonb("cluster_deficits"), // ClusterDeficit[]
-  
+
   // Integrity hash for tamper detection
   audit_hash: varchar("audit_hash", { length: 64 }).notNull(),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_basket_audit_basket_id").on(table.basket_id),
@@ -4404,37 +4404,37 @@ export type BasketAuditLog = typeof basket_audit_logs.$inferSelect;
 // Persona Credentials - stores login credentials for each persona type
 export const persona_credentials = pgTable("persona_credentials", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Persona type: franchisor, master_franchise, franchise
   persona_type: varchar("persona_type", { length: 30 }).notNull(),
-  
+
   // Email/password authentication
   email: varchar("email", { length: 255 }).notNull(),
   password_hash: varchar("password_hash", { length: 255 }).notNull(),
-  
+
   // Link to related entity
   user_id: varchar("user_id").references(() => users.id, { onDelete: 'set null' }),
   franchise_id: varchar("franchise_id").references(() => franchises.id, { onDelete: 'set null' }),
-  
+
   // Account status
   is_active: boolean("is_active").default(false).notNull(), // Activated after email confirmation
   is_verified: boolean("is_verified").default(false).notNull(),
-  
+
   // Activation token
   activation_token: varchar("activation_token", { length: 100 }),
   activation_token_expires: timestamp("activation_token_expires"),
   activated_at: timestamp("activated_at"),
-  
+
   // Password reset
   reset_token: varchar("reset_token", { length: 100 }),
   reset_token_expires: timestamp("reset_token_expires"),
-  
+
   // Login tracking
   last_login_at: timestamp("last_login_at"),
   login_count: integer("login_count").default(0).notNull(),
   failed_login_count: integer("failed_login_count").default(0).notNull(),
   locked_until: timestamp("locked_until"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -4459,21 +4459,21 @@ export type PersonaCredentials = typeof persona_credentials.$inferSelect;
 // Persona Sessions - persistent session storage for persona authentication
 export const persona_sessions = pgTable("persona_sessions", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Session token (64 hex chars from crypto.randomBytes(32))
   session_token: varchar("session_token", { length: 64 }).notNull().unique(),
-  
+
   // Link to credentials
   credentials_id: varchar("credentials_id").notNull().references(() => persona_credentials.id, { onDelete: 'cascade' }),
-  
+
   // Persona info (denormalized for quick access)
   persona_type: varchar("persona_type", { length: 30 }).notNull(),
   email: varchar("email", { length: 255 }).notNull(),
   franchise_id: varchar("franchise_id"),
-  
+
   // Session expiry
   expires_at: timestamp("expires_at").notNull(),
-  
+
   // Tracking
   created_at: timestamp("created_at").defaultNow().notNull(),
   last_accessed_at: timestamp("last_accessed_at").defaultNow().notNull(),
@@ -4496,13 +4496,13 @@ export type PersonaSession = typeof persona_sessions.$inferSelect;
 // Franchise Leads - candidates from landing page awaiting approval
 export const franchise_leads = pgTable("franchise_leads", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Auto-generated franchise name: DELFOS-XXXXXXXX
   franchise_code: varchar("franchise_code", { length: 20 }).notNull().unique(),
-  
+
   // Plan selection
   plan_id: varchar("plan_id").references(() => franchise_plans.id),
-  
+
   // Business info
   name: varchar("name", { length: 200 }).notNull(), // Full name / Razão Social
   trade_name: varchar("trade_name", { length: 200 }), // Fantasia
@@ -4510,7 +4510,7 @@ export const franchise_leads = pgTable("franchise_leads", {
   document_number: varchar("document_number", { length: 20 }).notNull(), // CPF/CNPJ
   secondary_document: varchar("secondary_document", { length: 30 }), // RG / Inscrição Estadual
   birth_date: timestamp("birth_date"),
-  
+
   // Address fields
   address_street: varchar("address_street", { length: 255 }),
   address_number: varchar("address_number", { length: 20 }),
@@ -4520,44 +4520,44 @@ export const franchise_leads = pgTable("franchise_leads", {
   address_zip: varchar("address_zip", { length: 20 }),
   address_city: varchar("address_city", { length: 100 }),
   address_country: varchar("address_country", { length: 3 }).default("BRA"),
-  
+
   // Contact
   phone: varchar("phone", { length: 30 }),
   whatsapp: varchar("whatsapp", { length: 30 }),
   email: varchar("email", { length: 255 }).notNull(),
-  
+
   // Documents upload (JSON array of URLs)
   documents_urls: jsonb("documents_urls"), // [{type: 'rg', url: '...'}, {type: 'cnpj', url: '...'}]
-  
+
   // Lead status: pending, approved, rejected
   status: varchar("status", { length: 20 }).default("pending").notNull(),
-  
+
   // Review by Franqueadora
   reviewed_by: varchar("reviewed_by").references(() => users.id),
   reviewed_at: timestamp("reviewed_at"),
   rejection_reason: text("rejection_reason"),
-  
+
   // If approved, link to created franchise
   approved_franchise_id: varchar("approved_franchise_id").references(() => franchises.id),
-  
+
   // Activation token for account setup
   activation_token: varchar("activation_token", { length: 100 }),
   activation_token_expires: timestamp("activation_token_expires"),
-  
+
   // General notes
   notes: text("notes"),
-  
+
   // Source tracking
   source: varchar("source", { length: 50 }).default("landing_page"), // landing_page, referral, manual
   referral_code: varchar("referral_code", { length: 50 }),
   utm_source: varchar("utm_source", { length: 100 }),
   utm_medium: varchar("utm_medium", { length: 100 }),
   utm_campaign: varchar("utm_campaign", { length: 100 }),
-  
+
   // IP and device for fraud prevention
   ip_address: varchar("ip_address", { length: 45 }),
   user_agent: text("user_agent"),
-  
+
   // ========== PAYMENT FIELDS (Stripe Integration) ==========
   // Payment status: pending, paid, failed, refunded
   payment_status: varchar("payment_status", { length: 20 }).default("pending").notNull(),
@@ -4569,12 +4569,12 @@ export const franchise_leads = pgTable("franchise_leads", {
   payment_currency: varchar("payment_currency", { length: 3 }).default("BRL"),
   paid_at: timestamp("paid_at"),
   payment_receipt_url: text("payment_receipt_url"),
-  
+
   // Auto pre-approval: true when docs uploaded AND payment confirmed
   documents_uploaded: boolean("documents_uploaded").default(false).notNull(),
   auto_pre_approved: boolean("auto_pre_approved").default(false).notNull(),
   pre_approved_at: timestamp("pre_approved_at"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -4597,18 +4597,78 @@ export const insertFranchiseLeadSchema = createInsertSchema(franchise_leads).omi
 export type InsertFranchiseLead = z.infer<typeof insertFranchiseLeadSchema>;
 export type FranchiseLead = typeof franchise_leads.$inferSelect;
 
+// Master Franchise Leads - candidates for Master Franchise
+export const master_leads = pgTable("master_leads", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+
+  // Auto-generated master code: MASTER-XXXXXXXX
+  master_code: varchar("master_code", { length: 20 }).notNull().unique(),
+
+  // Business info
+  name: varchar("name", { length: 200 }).notNull(), // Full name / Razão Social
+  document_type: varchar("document_type", { length: 20 }).notNull(), // 'cpf', 'cnpj', 'passport', 'tax_id'
+  document_number: varchar("document_number", { length: 50 }).notNull(),
+
+  // Territory interest
+  territory: varchar("territory", { length: 200 }).notNull(),
+
+  // Address fields
+  address_city: varchar("address_city", { length: 100 }),
+  address_country: varchar("address_country", { length: 3 }).default("BRA"),
+
+  // Contact
+  phone: varchar("phone", { length: 30 }),
+  email: varchar("email", { length: 255 }).notNull(),
+
+  // Lead status: pending, approved, rejected
+  status: varchar("status", { length: 20 }).default("pending").notNull(),
+
+  // Review by Franqueadora
+  reviewed_by: varchar("reviewed_by").references(() => users.id),
+  reviewed_at: timestamp("reviewed_at"),
+  rejection_reason: text("rejection_reason"),
+
+  // General notes
+  notes: text("notes"),
+
+  // Source tracking
+  source: varchar("source", { length: 50 }).default("landing_page"),
+
+  // IP and device for fraud prevention
+  ip_address: varchar("ip_address", { length: 45 }),
+  user_agent: text("user_agent"),
+
+  created_at: timestamp("created_at").defaultNow().notNull(),
+  updated_at: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_master_leads_status").on(table.status),
+  index("idx_master_leads_email").on(table.email),
+  index("idx_master_leads_code").on(table.master_code),
+  index("idx_master_leads_created").on(table.created_at),
+  index("idx_master_leads_territory").on(table.territory),
+]);
+
+export const insertMasterLeadSchema = createInsertSchema(master_leads).omit({
+  id: true,
+  created_at: true,
+  updated_at: true,
+  reviewed_at: true,
+});
+export type InsertMasterLead = z.infer<typeof insertMasterLeadSchema>;
+export type MasterLead = typeof master_leads.$inferSelect;
+
 // Franchise Fiscal Profile - tax configuration for franchise (internal panel)
 export const franchise_fiscal_profiles = pgTable("franchise_fiscal_profiles", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   franchise_id: varchar("franchise_id").notNull().references(() => franchises.id, { onDelete: 'cascade' }).unique(),
-  
+
   // Tax regime
   tax_regime: varchar("tax_regime", { length: 30 }).notNull(), // simples, lucro_presumido, lucro_real, mei
-  
+
   // Municipal inscription
   municipal_inscription: varchar("municipal_inscription", { length: 50 }),
-  
+
   // Applicable tax rates (percentages)
   tax_rate_iss: decimal("tax_rate_iss", { precision: 5, scale: 2 }), // ISS %
   tax_rate_pis: decimal("tax_rate_pis", { precision: 5, scale: 2 }), // PIS %
@@ -4616,10 +4676,10 @@ export const franchise_fiscal_profiles = pgTable("franchise_fiscal_profiles", {
   tax_rate_irpj: decimal("tax_rate_irpj", { precision: 5, scale: 2 }), // IRPJ %
   tax_rate_csll: decimal("tax_rate_csll", { precision: 5, scale: 2 }), // CSLL %
   tax_rate_other: decimal("tax_rate_other", { precision: 5, scale: 2 }), // Other %
-  
+
   // Notes
   notes: text("notes"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -4639,35 +4699,35 @@ export type FranchiseFiscalProfile = typeof franchise_fiscal_profiles.$inferSele
 // Global toggles for external services - controlled exclusively by Franchisor
 export const external_service_settings = pgTable("external_service_settings", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   // Service identifier: redis, openai, stripe, kraken, twitter, etc.
   service_key: varchar("service_key", { length: 50 }).notNull().unique(),
-  
+
   // Display name for UI
   service_name: varchar("service_name", { length: 100 }).notNull(),
-  
+
   // Service description
   description: text("description"),
-  
+
   // Category: data, ai, payment, trading, social
   category: varchar("category", { length: 30 }).notNull(),
-  
+
   // Toggle state: true = enabled, false = disabled
   is_enabled: boolean("is_enabled").default(true).notNull(),
-  
+
   // Priority/criticality level: critical, important, optional
   criticality: varchar("criticality", { length: 20 }).default("optional").notNull(),
-  
+
   // Warning message when disabled (shown to users)
   disabled_message: text("disabled_message"),
-  
+
   // Who last changed this setting
   last_changed_by: varchar("last_changed_by").references(() => users.id),
   last_changed_at: timestamp("last_changed_at"),
-  
+
   // Reason for last change (audit trail)
   change_reason: text("change_reason"),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
   updated_at: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
@@ -4687,22 +4747,22 @@ export type ExternalServiceSetting = typeof external_service_settings.$inferSele
 // Audit log for service toggle changes
 export const external_service_audit_log = pgTable("external_service_audit_log", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  
+
   service_key: varchar("service_key", { length: 50 }).notNull(),
-  
+
   // Previous and new state
   previous_state: boolean("previous_state").notNull(),
   new_state: boolean("new_state").notNull(),
-  
+
   // Who made the change
   changed_by: varchar("changed_by").references(() => users.id),
-  
+
   // Reason for change
   reason: text("reason"),
-  
+
   // IP address for security audit
   ip_address: varchar("ip_address", { length: 45 }),
-  
+
   created_at: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("idx_service_audit_service").on(table.service_key),
