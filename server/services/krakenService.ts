@@ -118,6 +118,64 @@ export async function fetchKrakenOrderBook(pair: string, count: number = 10): Pr
   }
 }
 
+// Fetch account balance
+export async function getBalance(): Promise<any> {
+  const enabled = await isKrakenRestEnabled();
+  if (!enabled) {
+    console.log('[KrakenREST] Service is disabled, returning empty balance');
+    return { result: {} };
+  }
+
+  const apiKey = process.env.KRAKEN_API_KEY;
+  const apiSecret = process.env.KRAKEN_API_SECRET;
+
+  if (!apiKey || !apiSecret) {
+    console.warn("[Kraken] Missing API credentials, returning mock balance");
+    return {
+      result: {
+        ZUSD: "10000.00",
+        XXBT: "0.50000000",
+        XETH: "10.00000000"
+      }
+    };
+  }
+
+  try {
+    const path = "/0/private/Balance";
+    const nonce = Date.now() * 1000;
+    const body = { nonce };
+    const signature = getKrakenSignature(path, body, apiSecret);
+
+    const response = await fetch(`${KRAKEN_API_URL}${path}`, {
+      method: "POST",
+      headers: {
+        "API-Key": apiKey,
+        "API-Sign": signature,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams(body as any).toString(),
+    });
+
+    const data = await response.json();
+
+    if (data.error && data.error.length > 0) {
+      console.error("Kraken Balance API error:", data.error);
+      // Return mock data on error to prevent dashboard crash during dev
+      return {
+        result: {
+          ZUSD: "0.00",
+          XXBT: "0.00000000"
+        }
+      };
+    }
+
+    return data;
+  } catch (error) {
+    console.error("Error fetching Kraken balance:", error);
+    return { result: {} };
+  }
+}
+
 // Update market data cache in database
 export async function updateMarketDataCache(tickers: KrakenTickerData[]): Promise<void> {
   for (const ticker of tickers) {
@@ -141,15 +199,15 @@ export async function getKrakenPairsForWebSocket(): Promise<string[]> {
   try {
     const exchanges = await storage.getAllExchanges();
     const krakenExchange = exchanges.find(e => e.name.toLowerCase() === 'kraken');
-    
+
     if (!krakenExchange) {
       console.warn('[WARNING] Kraken exchange not found in database');
       return [];
     }
-    
+
     const dbSymbols = await storage.getAllSymbols();
     const krakenSymbols = dbSymbols.filter(s => s.exchange_id === krakenExchange.id);
-    
+
     return krakenSymbols.map(s => s.symbol);
   } catch (error) {
     console.error('Error loading Kraken pairs:', error);
@@ -169,12 +227,12 @@ export const TRACKED_PAIRS_REST = [
 export function startMarketDataUpdates(intervalMs: number = 30000): NodeJS.Timeout {
   let failureCount = 0;
   const maxFailures = 5;
-  
+
   const updateData = async () => {
     try {
       console.log("Fetching market data from Kraken...");
       const tickers = await fetchKrakenTicker(TRACKED_PAIRS_REST);
-      
+
       if (tickers.length > 0) {
         await updateMarketDataCache(tickers);
         console.log(`[INFO] Updated ${tickers.length} market data entries`);
@@ -186,7 +244,7 @@ export function startMarketDataUpdates(intervalMs: number = 30000): NodeJS.Timeo
     } catch (error) {
       failureCount++;
       console.error(`[ERROR] Error updating market data (failure ${failureCount}/${maxFailures}):`, error);
-      
+
       if (failureCount >= maxFailures) {
         console.error(`[ERROR] Market data updates failed ${maxFailures} times consecutively. Check Kraken API connectivity.`);
         // Optionally notify administrators here

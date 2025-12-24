@@ -26,26 +26,26 @@ class StalenessGuardService {
   private config: StalenessConfig;
   private killSwitchActive: boolean = false;
   private checkInterval: NodeJS.Timeout | null = null;
-  
+
   // Auto-quarantine system: symbols that never receive data (>5min stale)
   // are automatically quarantined and don't count toward global kill switch
   private quarantinedSymbols: Map<string, number> = new Map(); // symbol -> quarantine timestamp
   private readonly QUARANTINE_THRESHOLD_SECONDS = 300; // 5 minutes
   private readonly RECOVERY_CHECK_SECONDS = 30; // Check quarantine recovery every 30s
-  
+
   // REST refresh callback: allows external service to refresh individual symbols
   private refreshSymbolCallback: ((symbol: string) => Promise<boolean>) | null = null;
-  
+
   // Track ongoing refresh attempts to prevent duplicates
   private refreshInProgress: Map<string, number> = new Map(); // symbol -> start timestamp
   private readonly REFRESH_TIMEOUT_MS = 10000; // 10 second timeout for individual refresh
-  
+
   // Track symbols that should be permanently removed (unsupported pairs)
   private unsupportedSymbols: Set<string> = new Set();
 
   constructor() {
     this.dataIngestion = new DataIngestionService();
-    
+
     // Adjusted thresholds to accommodate Kraken WebSocket cadence (~5-6s between ticks)
     // Original: warn 3s, hard 10s, kill 60s
     // Updated: warn 8s (allows WS ~6s cadence + margin), hard 15s, kill 60s (unchanged)
@@ -61,7 +61,7 @@ class StalenessGuardService {
     console.log(`   - WARN threshold: ${this.config.warnThresholdSeconds}s (block new positions)`);
     console.log(`   - HARD threshold: ${this.config.hardThresholdSeconds}s (zero signals)`);
     console.log(`   - KILL_SWITCH threshold: ${this.config.killSwitchSeconds}s (pause global)`);
-    
+
     // Check staleness every 2 seconds
     this.checkInterval = setInterval(() => {
       this.checkGlobalStaleness();
@@ -98,7 +98,7 @@ class StalenessGuardService {
     if (!this.unsupportedSymbols.has(symbol)) {
       this.unsupportedSymbols.add(symbol);
       console.warn(`🚫 Marked ${symbol} as unsupported - will be excluded from tracking`);
-      
+
       // Also quarantine immediately to stop further processing
       if (!this.quarantinedSymbols.has(symbol)) {
         this.quarantinedSymbols.set(symbol, Date.now());
@@ -134,7 +134,7 @@ class StalenessGuardService {
       }
 
       const ageSeconds = lastUpdate > 0 ? (now - lastUpdate) / 1000 : 999;
-      
+
       const level = this.determineStalenessLevel(ageSeconds);
 
       // Record staleness metric
@@ -149,7 +149,7 @@ class StalenessGuardService {
       };
     } catch (error) {
       console.error(`Error checking staleness for ${symbol}:`, error);
-      
+
       // On error, assume worst case
       return {
         symbol,
@@ -195,7 +195,7 @@ class StalenessGuardService {
       this.checkDataStaleness(exchange, symbol, 'l1'),
       this.checkDataStaleness(exchange, symbol, 'l2'),
     ]);
-    
+
     // Use whichever data source is freshest (lowest age)
     const status = l1Status.ageSeconds < l2Status.ageSeconds ? l1Status : l2Status;
 
@@ -241,7 +241,7 @@ class StalenessGuardService {
       this.checkDataStaleness(exchange, symbol, 'l1'),
       this.checkDataStaleness(exchange, symbol, 'l2'),
     ]);
-    
+
     // Use whichever data source is freshest (lowest age)
     const status = l1Status.ageSeconds < l2Status.ageSeconds ? l1Status : l2Status;
     return status.level === 'hard' || status.level === 'kill_switch';
@@ -255,18 +255,18 @@ class StalenessGuardService {
     // This runs periodically to check if we should activate/deactivate global kill switch
     // Auto-quarantine system: symbols >5min stale are quarantined and don't count toward kill switch
     let trackedSymbols: string[];
-    
+
     try {
       const allSymbols = await getKrakenPairsForWebSocket();
-      
+
       // Filter out unsupported symbols
       trackedSymbols = allSymbols.filter(s => !this.unsupportedSymbols.has(s));
-      
+
       if (trackedSymbols.length === 0) {
         console.warn('⚠️  No tracked symbols found for staleness check');
         return;
       }
-      
+
       if (this.unsupportedSymbols.size > 0) {
         console.log(`ℹ️  Excluded ${this.unsupportedSymbols.size} unsupported symbols from staleness check`);
       }
@@ -280,14 +280,14 @@ class StalenessGuardService {
     let newlyQuarantined: string[] = [];
     let recovered: string[] = [];
     let needsRefresh: string[] = [];
-    
+
     // Parallelize staleness checks in chunks to reduce sweep time
     const CHUNK_SIZE = 20; // Process 20 symbols at once
     const chunks: string[][] = [];
     for (let i = 0; i < trackedSymbols.length; i += CHUNK_SIZE) {
       chunks.push(trackedSymbols.slice(i, i + CHUNK_SIZE));
     }
-    
+
     // Process all chunks in parallel
     for (const chunk of chunks) {
       const chunkResults = await Promise.all(
@@ -297,64 +297,64 @@ class StalenessGuardService {
             this.checkDataStaleness('kraken', symbol, 'l1'),
             this.checkDataStaleness('kraken', symbol, 'l2'),
           ]);
-          
+
           // Use the freshest timestamp (lowest age) to avoid false positives
           const status = l1Status.ageSeconds < l2Status.ageSeconds ? l1Status : l2Status;
           return { symbol, status };
         })
       );
-      
+
       // Process chunk results with quarantine logic
       for (const { symbol, status } of chunkResults) {
         const isQuarantined = this.quarantinedSymbols.has(symbol);
-        
+
         // Auto-quarantine: symbols >5min stale go to quarantine
         if (status.ageSeconds >= this.QUARANTINE_THRESHOLD_SECONDS && !isQuarantined) {
           this.quarantinedSymbols.set(symbol, Date.now());
           newlyQuarantined.push(symbol);
-          
+
           // Record quarantine metrics
           observabilityService.updateBreakerState('symbol', 'quarantine', symbol, 1);
           observabilityService.updateQuarantineStatus(symbol, true);
           continue; // Skip this symbol from kill switch calculation
         }
-        
+
         // Auto-recovery: if symbol in quarantine but now fresh, remove from quarantine
         if (isQuarantined && status.level === 'fresh') {
           this.quarantinedSymbols.delete(symbol);
           recovered.push(symbol);
-          
+
           // Record recovery metrics (back to normal state)
           observabilityService.updateBreakerState('symbol', 'quarantine', symbol, 0);
           observabilityService.updateQuarantineStatus(symbol, false);
-          
+
           // Reset staleness to 0 to ensure clean re-entry to active tracking
           observabilityService.updateStaleness('l1', symbol, 0);
           observabilityService.updateStaleness('l2', symbol, 0);
         }
-        
+
         // Skip quarantined symbols from kill switch calculation
         if (this.quarantinedSymbols.has(symbol)) {
           continue;
         }
-        
+
         // Individual symbol REST refresh: if symbol >WARN but not in quarantine/unsupported
         // and refresh callback is registered, try to refresh via REST
         if (status.level === 'warn' && this.refreshSymbolCallback && !needsRefresh.includes(symbol) && !this.unsupportedSymbols.has(symbol)) {
           needsRefresh.push(symbol);
         }
-        
+
         // Only count active (non-quarantined) symbols toward kill switch
         maxStaleness = Math.max(maxStaleness, status.ageSeconds);
 
         if (status.level === 'kill_switch') {
           killSwitchCount++;
-          
+
           // Activate kill switch if ANY active symbol exceeds threshold
           if (!this.killSwitchActive) {
             this.killSwitchActive = true;
             console.error(`🚨 KILL SWITCH ACTIVATED - ${symbol} data staleness: ${status.ageSeconds.toFixed(1)}s`);
-            
+
             // Record metric (state: 2 = triggered)
             observabilityService.updateBreakerState('global', 'kill_switch_staleness', 'global', 2);
           }
@@ -365,41 +365,41 @@ class StalenessGuardService {
     // Trigger individual symbol refresh via REST for stale active symbols
     if (needsRefresh.length > 0 && this.refreshSymbolCallback) {
       const now = Date.now();
-      
+
       // Filter out symbols already being refreshed or timed out
       const toRefresh = needsRefresh.filter(symbol => {
         const inProgressSince = this.refreshInProgress.get(symbol);
         if (!inProgressSince) return true; // Not in progress, can refresh
-        
+
         // Check if timed out
         if (now - inProgressSince > this.REFRESH_TIMEOUT_MS) {
           console.warn(`⚠️  Refresh timeout for ${symbol}, retrying`);
           this.refreshInProgress.delete(symbol);
           return true;
         }
-        
+
         return false; // Still in progress, skip
       });
-      
+
       if (toRefresh.length > 0) {
         console.log(`🔄 Triggering REST refresh for ${toRefresh.length} stale symbols: ${toRefresh.join(', ')}`);
-        
+
         // Fire and forget with timeout - don't await
         toRefresh.forEach(symbol => {
           this.refreshInProgress.set(symbol, now);
-          
+
           // Race between timeout and actual refresh
           Promise.race([
             this.refreshSymbolCallback!(symbol),
-            new Promise<boolean>((_, reject) => 
+            new Promise<boolean>((_, reject) =>
               setTimeout(() => reject(new Error('Timeout')), this.REFRESH_TIMEOUT_MS)
             )
           ])
-          .then(() => this.refreshInProgress.delete(symbol))
-          .catch(err => {
-            console.error(`❌ Refresh failed for ${symbol}:`, err.message);
-            this.refreshInProgress.delete(symbol);
-          });
+            .then(() => this.refreshInProgress.delete(symbol))
+            .catch(err => {
+              console.error(`❌ Refresh failed for ${symbol}:`, err.message);
+              this.refreshInProgress.delete(symbol);
+            });
         });
       }
     }
@@ -413,11 +413,11 @@ class StalenessGuardService {
     }
 
     const activeSymbolsCount = trackedSymbols.length - this.quarantinedSymbols.size;
-    
+
     // Trigger circuit breakers based on staleness levels (if circuit breaker service is available)
     if (this.circuitBreakerService) {
       const PORTFOLIO_ID = 'global'; // Use global portfolio ID for staleness breakers
-      
+
       // Determine worst staleness level across active symbols
       if (maxStaleness >= this.config.killSwitchSeconds && killSwitchCount > 0) {
         // KILL level: pause all trading
@@ -448,12 +448,12 @@ class StalenessGuardService {
         this.circuitBreakerService.resetStalenessBreaker(PORTFOLIO_ID);
       }
     }
-    
+
     // AUTO-RECOVERY: Only deactivate if ALL ACTIVE symbols are below kill switch threshold
     if (this.killSwitchActive && killSwitchCount === 0) {
       this.killSwitchActive = false;
       console.log(`✅ Kill switch AUTO-DEACTIVATED - all ${activeSymbolsCount} active symbols fresh (${this.quarantinedSymbols.size} quarantined, max staleness: ${maxStaleness.toFixed(1)}s)`);
-      
+
       // Record metric (state: 0 = normal)
       observabilityService.updateBreakerState('global', 'kill_switch_staleness', 'global', 0);
     } else if (this.killSwitchActive) {
@@ -494,9 +494,13 @@ class StalenessGuardService {
     quarantinedCount: number;
     quarantinedSymbols: string[];
   } {
+    const allSymbols = await getKrakenPairsForWebSocket();
+    const activeSymbolsCount = allSymbols.length - this.unsupportedSymbols.size - this.quarantinedSymbols.size;
+
     return {
       quarantinedCount: this.quarantinedSymbols.size,
       quarantinedSymbols: Array.from(this.quarantinedSymbols.keys()),
+      activeSymbols: Math.max(0, activeSymbolsCount)
     };
   }
 
